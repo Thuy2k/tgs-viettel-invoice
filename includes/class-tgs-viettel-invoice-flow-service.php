@@ -27,7 +27,7 @@ class TGS_Viettel_Invoice_Flow_Service
 
         $sale = $wpdb->get_row(
             $wpdb->prepare(
-                'SELECT local_ledger_id, local_ledger_code, local_ledger_person_id, created_at FROM ' . TGS_TABLE_LOCAL_LEDGER . ' WHERE local_ledger_id = %d LIMIT 1',
+                'SELECT local_ledger_id, local_ledger_code, local_ledger_person_id, local_ledger_item_id, created_at FROM ' . TGS_TABLE_LOCAL_LEDGER . ' WHERE local_ledger_id = %d LIMIT 1',
                 $sale_ledger_id
             ),
             ARRAY_A
@@ -51,25 +51,31 @@ class TGS_Viettel_Invoice_Flow_Service
             );
         }
 
+        // Lấy danh sách item_id từ cột JSON của phiếu bán hàng
+        $item_ids_json = $sale['local_ledger_item_id'] ?? '';
+        $item_ids = is_string($item_ids_json) ? json_decode($item_ids_json, true) : [];
+        $item_ids = is_array($item_ids) ? array_map('intval', array_filter($item_ids)) : [];
+
+        if (empty($item_ids)) {
+            return [
+                'success' => false,
+                'message' => 'Đơn chưa có dòng sản phẩm để gửi hóa đơn điện tử.',
+            ];
+        }
+
+        $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
         $items = $wpdb->get_results(
             $wpdb->prepare(
                 'SELECT i.local_ledger_item_id, i.local_product_name_id, i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price,
                         p.local_product_name, p.local_product_sku, p.local_product_unit
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  LEFT JOIN ' . TGS_TABLE_LOCAL_PRODUCT_NAME . ' p ON p.local_product_name_id = i.local_product_name_id
-                 WHERE i.local_ledger_id = %d
+                 WHERE i.local_ledger_item_id IN (' . $placeholders . ')
                  ORDER BY i.local_ledger_item_id ASC',
-                $sale_ledger_id
+                ...$item_ids
             ),
             ARRAY_A
         );
-
-        if (empty($items)) {
-            return [
-                'success' => false,
-                'message' => 'Đơn chưa có dòng sản phẩm để gửi hóa đơn điện tử.',
-            ];
-        }
 
         $source_items = [];
         foreach ($items as $item) {
@@ -250,13 +256,13 @@ class TGS_Viettel_Invoice_Flow_Service
                 $unit_price = 0.0;
             }
 
-            $without_tax = round($quantity * $unit_price, 3);
-            $tax_amount = round(($without_tax * $tax_percent) / 100, 3);
-            $with_tax = round($without_tax + $tax_amount, 3);
+            $without_tax = round($quantity * $unit_price);
+            $tax_amount  = round($without_tax * $tax_percent / 100);
+            $with_tax    = $without_tax + $tax_amount;
 
             $sum_without_tax += $without_tax;
-            $sum_tax += $tax_amount;
-            $sum_with_tax += $with_tax;
+            $sum_tax         += $tax_amount;
+            $sum_with_tax    += $with_tax;
 
             $item_info[] = [
                 'lineNumber' => $line_number,
@@ -265,7 +271,7 @@ class TGS_Viettel_Invoice_Flow_Service
                 'itemName' => (string) ($item['item_name'] ?? ''),
                 'unitName' => (string) ($item['unit_name'] ?? ''),
                 'quantity' => $quantity,
-                'unitPrice' => $unit_price,
+                'unitPrice' => round($unit_price),
                 'itemTotalAmountWithoutTax' => $without_tax,
                 'itemTotalAmountAfterDiscount' => $without_tax,
                 'itemTotalAmountWithTax' => $with_tax,
@@ -278,9 +284,9 @@ class TGS_Viettel_Invoice_Flow_Service
             $line_number++;
         }
 
-        $sum_without_tax = round($sum_without_tax, 3);
-        $sum_tax = round($sum_tax, 3);
-        $sum_with_tax = round($sum_with_tax, 3);
+        $sum_without_tax = (int) $sum_without_tax;
+        $sum_tax         = (int) $sum_tax;
+        $sum_with_tax    = (int) $sum_with_tax;
 
         $customer = isset($filtered_payload['customer']) && is_array($filtered_payload['customer'])
             ? $filtered_payload['customer']
@@ -361,6 +367,7 @@ class TGS_Viettel_Invoice_Flow_Service
     {
         $supplier_tax_code = trim((string) $supplier_tax_code);
         $transaction_uuid = trim((string) $transaction_uuid);
+        $today = current_time('Y-m-d');
 
         if ($supplier_tax_code === '' || $transaction_uuid === '') {
             return [
@@ -374,6 +381,8 @@ class TGS_Viettel_Invoice_Flow_Service
             'payload' => [
                 'supplierTaxCode' => $supplier_tax_code,
                 'transactionUuid' => $transaction_uuid,
+                'startDate' => $today,
+                'endDate' => $today,
             ],
         ];
     }

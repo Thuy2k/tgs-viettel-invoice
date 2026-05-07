@@ -56,6 +56,12 @@ class TGS_Viettel_Invoice_Plugin
 
         add_action('wp_ajax_tgs_viettel_send_from_sale', [$this, 'ajax_send_from_sale']);
         add_action('wp_ajax_nopriv_tgs_viettel_send_from_sale', [$this, 'ajax_send_from_sale']);
+        add_action('wp_ajax_tgs_viettel_pos_retry_invoice', [$this, 'ajax_pos_retry_invoice']);
+        add_action('wp_ajax_nopriv_tgs_viettel_pos_retry_invoice', [$this, 'ajax_pos_retry_invoice']);
+        add_action('wp_ajax_tgs_viettel_pos_send_invoice_email', [$this, 'ajax_pos_send_invoice_email']);
+        add_action('wp_ajax_nopriv_tgs_viettel_pos_send_invoice_email', [$this, 'ajax_pos_send_invoice_email']);
+        add_action('wp_ajax_tgs_viettel_pos_preview_invoice_pdf', [$this, 'ajax_pos_preview_invoice_pdf']);
+        add_action('wp_ajax_nopriv_tgs_viettel_pos_preview_invoice_pdf', [$this, 'ajax_pos_preview_invoice_pdf']);
         add_action('wp_ajax_tgs_viettel_get_sale_debug_log', [$this, 'ajax_get_sale_debug_log']);
         add_action('wp_ajax_tgs_viettel_pos_list_statuses', [$this, 'ajax_pos_list_statuses']);
 
@@ -556,55 +562,764 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
-            wp_send_json_error(['message' => 'Chưa tìm thấy bảng theo dõi hóa đơn Viettel.'], 500);
+        if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE') || !defined('TGS_TABLE_LOCAL_LEDGER')) {
+            wp_send_json_error(['message' => 'Chưa tìm thấy bảng dữ liệu cần thiết.'], 500);
             return;
         }
 
         global $wpdb;
 
         $status_filter = isset($_POST['status']) ? sanitize_text_field(wp_unslash($_POST['status'])) : 'all';
-        $limit = isset($_POST['limit']) ? intval($_POST['limit']) : 40;
-        if ($limit <= 0 || $limit > 120) {
-            $limit = 40;
-        }
-
-        $where = '1=1';
-        if ($status_filter === 'success') {
-            $where = "invoice_state = 'done'";
-        } elseif ($status_filter === 'failed') {
-            $where = "invoice_state IN ('issue_error', 'cqt_error', 'validate_error', 'error')";
-        } elseif ($status_filter === 'pending') {
-            $where = "invoice_state IN ('pending', 'issued')";
-        } elseif ($status_filter === 'unsent') {
-            $where = "COALESCE(send_cqt_status, 0) = 0";
-        }
+        $age_filter = isset($_POST['age_filter']) ? sanitize_text_field(wp_unslash($_POST['age_filter'])) : 'all';
+        // Theo yêu cầu vận hành POS: luôn lấy 100 đơn gần nhất để có tab "Chưa gửi" xử lý về sau.
+        $limit = 100;
+        $sale_order_type = defined('TGS_LEDGER_TYPE_SALE_ORDER') ? intval(TGS_LEDGER_TYPE_SALE_ORDER) : 10;
 
         $sql = "SELECT
-                    local_viettel_invoice_id,
-                    sale_ledger_id,
-                    local_ledger_code,
-                    invoice_state,
-                    issue_status,
-                    send_cqt_status,
-                    contains_under24_main_item,
-                    issue_transaction_uuid,
-                    issue_http_code,
-                    cqt_http_code,
-                    error_message,
-                    created_at,
-                    updated_at
-                FROM " . TGS_TABLE_LOCAL_VIETTEL_INVOICE . "
-                WHERE {$where}
-                ORDER BY local_viettel_invoice_id DESC
+                    l.local_ledger_id AS sale_ledger_id,
+                    l.local_ledger_code,
+                    l.local_ledger_item_id,
+                    vi.local_viettel_invoice_id,
+                    vi.invoice_state,
+                    vi.issue_status,
+                    vi.send_cqt_status,
+                    vi.contains_under24_main_item,
+                    vi.issue_transaction_uuid,
+                    vi.issue_http_code,
+                    vi.cqt_http_code,
+                    vi.error_message,
+                    vi.template_code,
+                    vi.issue_response_payload,
+                    COALESCE(vi.updated_at, l.updated_at) AS updated_at,
+                    COALESCE(vi.created_at, l.created_at) AS created_at
+                FROM " . TGS_TABLE_LOCAL_LEDGER . " l
+                LEFT JOIN (
+                    SELECT vi1.*
+                    FROM " . TGS_TABLE_LOCAL_VIETTEL_INVOICE . " vi1
+                    INNER JOIN (
+                        SELECT sale_ledger_id, MAX(local_viettel_invoice_id) AS max_id
+                        FROM " . TGS_TABLE_LOCAL_VIETTEL_INVOICE . "
+                        GROUP BY sale_ledger_id
+                    ) vim ON vim.max_id = vi1.local_viettel_invoice_id
+                ) vi ON vi.sale_ledger_id = l.local_ledger_id
+                WHERE l.local_ledger_type = %d
+                  AND (l.is_deleted = 0 OR l.is_deleted IS NULL)
+                ORDER BY l.local_ledger_id DESC
                 LIMIT %d";
 
-        $rows = $wpdb->get_results($wpdb->prepare($sql, $limit), ARRAY_A);
+        $rows = $wpdb->get_results($wpdb->prepare($sql, $sale_order_type, $limit), ARRAY_A);
+
+                $under24_flags = $this->compute_under24_main_flags_for_sale_rows($rows);
+
+        $age_counts = [
+            'all' => 0,
+            'under24' => 0,
+            'over24' => 0,
+        ];
+        $status_counts = [
+            'all' => 0,
+            'success' => 0,
+            'failed' => 0,
+            'pending' => 0,
+            'unsent' => 0,
+        ];
+
+        if (is_array($rows)) {
+            foreach ($rows as &$row) {
+                $row['invoice_state'] = !empty($row['invoice_state'])
+                    ? $row['invoice_state']
+                    : 'unsent';
+                $row['issue_status'] = intval($row['issue_status'] ?? 0);
+                $row['send_cqt_status'] = intval($row['send_cqt_status'] ?? 0);
+                $row['issue_http_code'] = intval($row['issue_http_code'] ?? 0);
+                $row['cqt_http_code'] = intval($row['cqt_http_code'] ?? 0);
+                $row['invoice_no'] = $this->extract_invoice_no_from_issue_payload($row['issue_response_payload'] ?? '');
+                $row['template_code'] = sanitize_text_field($row['template_code'] ?? '');
+                if ($row['template_code'] === '') {
+                    $row['template_code'] = '1/1156';
+                }
+                $row['contains_under24_main_item'] = !empty($under24_flags[intval($row['sale_ledger_id'] ?? 0)]) ? 1 : 0;
+                $row['age_group'] = !empty($row['contains_under24_main_item']) ? 'under24' : 'over24';
+                $state = sanitize_text_field($row['invoice_state']);
+
+                $age_counts['all']++;
+                if ($row['age_group'] === 'under24') {
+                    $age_counts['under24']++;
+                } else {
+                    $age_counts['over24']++;
+                }
+
+                if ($age_filter === 'all' || $age_filter === $row['age_group']) {
+                    $status_counts['all']++;
+                    if ($state === 'done') {
+                        $status_counts['success']++;
+                    }
+                    if (in_array($state, ['issue_error', 'cqt_error', 'validate_error', 'error'], true)) {
+                        $status_counts['failed']++;
+                    }
+                    if (in_array($state, ['pending', 'issued'], true)) {
+                        $status_counts['pending']++;
+                    }
+                    if ($state === 'unsent' || intval($row['send_cqt_status'] ?? 0) === 0) {
+                        $status_counts['unsent']++;
+                    }
+                }
+
+                $matches_status = true;
+                if ($status_filter === 'success') {
+                    $matches_status = ($state === 'done');
+                } elseif ($status_filter === 'failed') {
+                    $matches_status = in_array($state, ['issue_error', 'cqt_error', 'validate_error', 'error'], true);
+                } elseif ($status_filter === 'pending') {
+                    $matches_status = in_array($state, ['pending', 'issued'], true);
+                } elseif ($status_filter === 'unsent') {
+                    $matches_status = ($state === 'unsent' || intval($row['send_cqt_status'] ?? 0) === 0);
+                }
+
+                $matches_age = true;
+                if ($age_filter === 'under24') {
+                    $matches_age = !empty($row['contains_under24_main_item']);
+                } elseif ($age_filter === 'over24') {
+                    $matches_age = empty($row['contains_under24_main_item']);
+                }
+
+                $row['_matches_filters'] = $matches_status && $matches_age;
+                unset($row['local_ledger_item_id']);
+                unset($row['issue_response_payload']);
+            }
+            unset($row);
+
+            $rows = array_values(array_filter($rows, static function ($row) {
+                return !empty($row['_matches_filters']);
+            }));
+
+            foreach ($rows as &$row) {
+                unset($row['_matches_filters']);
+            }
+            unset($row);
+        }
 
         wp_send_json_success([
             'items' => is_array($rows) ? $rows : [],
             'status_filter' => $status_filter,
+            'age_filter' => $age_filter,
+            'age_counts' => $age_counts,
+            'status_counts' => $status_counts,
         ]);
+    }
+
+    /**
+     * POS retry thông minh:
+     * - Nếu hóa đơn đã issue thành công (có transaction UUID) => chỉ gửi lại CQT.
+     * - Nếu chưa issue được => chạy lại full flow issue + send CQT.
+     */
+    public function ajax_pos_retry_invoice()
+    {
+        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+        if (
+            empty($nonce)
+            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
+        ) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+            return;
+        }
+
+        if (!current_user_can('read')) {
+            wp_send_json_error(['message' => 'Bạn không có quyền gửi lại hóa đơn.'], 403);
+            return;
+        }
+
+        if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
+            wp_send_json_error(['message' => 'Chưa tìm thấy bảng theo dõi hóa đơn Viettel.'], 500);
+            return;
+        }
+
+        $sale_ledger_id = intval($_POST['sale_ledger_id'] ?? 0);
+        if ($sale_ledger_id <= 0) {
+            wp_send_json_error(['message' => 'Thiếu sale_ledger_id để gửi lại.'], 400);
+            return;
+        }
+
+        global $wpdb;
+        $latest = $wpdb->get_row(
+            $wpdb->prepare(
+                'SELECT local_viettel_invoice_id, sale_ledger_id, local_ledger_code, issue_status, send_cqt_status, issue_transaction_uuid, resend_count
+                 FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . '
+                 WHERE sale_ledger_id = %d
+                 ORDER BY local_viettel_invoice_id DESC
+                 LIMIT 1',
+                $sale_ledger_id
+            ),
+            ARRAY_A
+        );
+
+        $invoice_id = intval($latest['local_viettel_invoice_id'] ?? 0);
+        $transaction_uuid = sanitize_text_field($latest['issue_transaction_uuid'] ?? '');
+        $issue_status = intval($latest['issue_status'] ?? 0);
+        $created_by = get_current_user_id();
+
+        if (empty($latest)) {
+            $sale_code = (string) $wpdb->get_var(
+                $wpdb->prepare(
+                    'SELECT local_ledger_code FROM ' . TGS_TABLE_LOCAL_LEDGER . ' WHERE local_ledger_id = %d LIMIT 1',
+                    $sale_ledger_id
+                )
+            );
+
+            if ($sale_code === '') {
+                wp_send_json_error(['message' => 'Không tìm thấy phiếu bán để gửi lại hóa đơn.'], 404);
+                return;
+            }
+
+            $latest = [
+                'local_viettel_invoice_id' => 0,
+                'sale_ledger_id' => $sale_ledger_id,
+                'local_ledger_code' => $sale_code,
+                'issue_status' => 0,
+                'send_cqt_status' => 0,
+                'issue_transaction_uuid' => '',
+                'resend_count' => 0,
+            ];
+        }
+
+        if ($invoice_id > 0) {
+            $wpdb->update(
+                TGS_TABLE_LOCAL_VIETTEL_INVOICE,
+                [
+                    'resend_count' => intval($latest['resend_count'] ?? 0) + 1,
+                    'last_retry_at' => current_time('mysql'),
+                    'updated_at' => current_time('mysql'),
+                ],
+                ['local_viettel_invoice_id' => $invoice_id],
+                ['%d', '%s', '%s'],
+                ['%d']
+            );
+        }
+
+        // Case 1: Đã issue thành công => chỉ gửi lại CQT, không tạo lại hóa đơn.
+        if ($issue_status === 1 && $transaction_uuid !== '') {
+            $settings = self::get_settings();
+            $cqt_payload_result = $this->flow_service->build_send_cqt_payload(
+                sanitize_text_field($settings['supplier_tax_code'] ?? ''),
+                $transaction_uuid
+            );
+
+            if (empty($cqt_payload_result['success'])) {
+                wp_send_json_error([
+                    'message' => $cqt_payload_result['message'] ?? 'Không tạo được payload gửi CQT.',
+                    'step' => 'build_cqt_payload',
+                ], 400);
+                return;
+            }
+
+            $cqt_payload = $cqt_payload_result['payload'];
+            $cqt_payload['local_ledger_code'] = sanitize_text_field($latest['local_ledger_code'] ?? '');
+
+            $cqt_result = $this->submit_invoice_payload($cqt_payload, 'send_cqt', [
+                'skip_persist' => true,
+                'invoice_record_id' => $invoice_id,
+                'step_name' => 'send_cqt_retry',
+                'action_name' => 'send_cqt_retry',
+                'transaction_uuid' => $transaction_uuid,
+                'created_by' => $created_by,
+                'sale_ledger_id' => $sale_ledger_id,
+            ]);
+
+            if (empty($cqt_result['success'])) {
+                $this->update_auto_flow_tracking($invoice_id, [
+                    'invoice_state' => 'cqt_error',
+                    'send_cqt_status' => 2,
+                    'cqt_request_payload' => wp_json_encode($cqt_payload, JSON_UNESCAPED_UNICODE),
+                    'cqt_response_payload' => wp_json_encode($cqt_result, JSON_UNESCAPED_UNICODE),
+                    'cqt_http_code' => intval($cqt_result['http_code'] ?? 0),
+                    'cqt_error_message' => sanitize_text_field($cqt_result['message'] ?? 'Lỗi gửi CQT.'),
+                    'error_message' => sanitize_text_field($cqt_result['message'] ?? 'Lỗi gửi CQT.'),
+                    'updated_at' => current_time('mysql'),
+                ]);
+
+                wp_send_json_error([
+                    'message' => $cqt_result['message'] ?? 'Gửi lại CQT thất bại.',
+                    'step' => 'send_cqt_retry',
+                    'http_code' => intval($cqt_result['http_code'] ?? 0),
+                ], 400);
+                return;
+            }
+
+            $this->update_auto_flow_tracking($invoice_id, [
+                'invoice_state' => 'done',
+                'send_cqt_status' => 1,
+                'cqt_request_payload' => wp_json_encode($cqt_payload, JSON_UNESCAPED_UNICODE),
+                'cqt_response_payload' => wp_json_encode($cqt_result['response'] ?? $cqt_result, JSON_UNESCAPED_UNICODE),
+                'cqt_http_code' => intval($cqt_result['http_code'] ?? 0),
+                'cqt_error_message' => '',
+                'error_message' => '',
+                'cqt_sent_at' => current_time('mysql'),
+                'updated_at' => current_time('mysql'),
+            ]);
+
+            wp_send_json_success([
+                'message' => 'Đã gửi lại CQT thành công (không tạo lại hóa đơn).',
+                'sale_ledger_id' => $sale_ledger_id,
+                'mode' => 'send_cqt_only',
+                'transaction_uuid' => $transaction_uuid,
+            ]);
+            return;
+        }
+
+        // Case 2: Chưa issue thành công => chạy lại full flow.
+        if (!$this->flow_service) {
+            wp_send_json_error(['message' => 'Flow service chưa khởi tạo.'], 500);
+            return;
+        }
+
+        $settings = self::get_settings();
+        if (empty($settings['username']) || empty($settings['supplier_tax_code'])) {
+            wp_send_json_error(['message' => 'Chưa cấu hình Viettel Invoice. Vui lòng vào Cấu hình để thiết lập.'], 400);
+            return;
+        }
+
+        $this->run_auto_issue_cqt_flow([
+            'sale_ledger_id' => $sale_ledger_id,
+            'sale_code' => sanitize_text_field($latest['local_ledger_code'] ?? ''),
+            'employee_id' => $created_by,
+        ], $settings);
+
+        wp_send_json_success([
+            'message' => 'Đã gửi lại theo full flow do hóa đơn chưa phát hành thành công.',
+            'sale_ledger_id' => $sale_ledger_id,
+            'mode' => 'full_flow',
+        ]);
+    }
+
+    /**
+     * POS: gửi email file PDF hóa đơn từ danh sách "Thành công".
+     */
+    public function ajax_pos_send_invoice_email()
+    {
+        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+        if (
+            empty($nonce)
+            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
+        ) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+            return;
+        }
+
+        if (!current_user_can('read')) {
+            wp_send_json_error(['message' => 'Bạn không có quyền gửi email hóa đơn.'], 403);
+            return;
+        }
+
+        if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
+            wp_send_json_error(['message' => 'Chưa tìm thấy bảng theo dõi hóa đơn Viettel.'], 500);
+            return;
+        }
+
+        $sale_ledger_id = intval($_POST['sale_ledger_id'] ?? 0);
+        if ($sale_ledger_id <= 0) {
+            wp_send_json_error(['message' => 'Thiếu sale_ledger_id.'], 400);
+            return;
+        }
+
+        $to_email = sanitize_email($_POST['to_email'] ?? 'thuy.nguyenvan2000hn@gmail.com');
+        if ($to_email === '') {
+            $to_email = 'thuy.nguyenvan2000hn@gmail.com';
+        }
+
+        global $wpdb;
+        $created_by = get_current_user_id();
+        $latest = $wpdb->get_row(
+            $wpdb->prepare(
+                'SELECT local_viettel_invoice_id, sale_ledger_id, local_ledger_code, invoice_state, template_code, issue_response_payload
+                 FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . '
+                 WHERE sale_ledger_id = %d
+                 ORDER BY local_viettel_invoice_id DESC
+                 LIMIT 1',
+                $sale_ledger_id
+            ),
+            ARRAY_A
+        );
+
+        if (empty($latest)) {
+            wp_send_json_error(['message' => 'Không tìm thấy hóa đơn Viettel của đơn này.'], 404);
+            return;
+        }
+
+        if (sanitize_text_field($latest['invoice_state'] ?? '') !== 'done') {
+            wp_send_json_error(['message' => 'Chỉ gửi email cho hóa đơn đã gửi CQT thành công.'], 400);
+            return;
+        }
+
+        $invoice_no = $this->extract_invoice_no_from_issue_payload($latest['issue_response_payload'] ?? '');
+        if ($invoice_no === '') {
+            wp_send_json_error(['message' => 'Không lấy được invoiceNo để tải file PDF.'], 400);
+            return;
+        }
+
+        $template_code = '1/1156';
+
+        $settings = self::get_settings();
+        $supplier_tax_code = sanitize_text_field($settings['supplier_tax_code'] ?? '');
+        if ($supplier_tax_code === '') {
+            wp_send_json_error(['message' => 'Thiếu MST nhà cung cấp trong cấu hình Viettel.'], 400);
+            return;
+        }
+
+        $pdf_result = $this->fetch_invoice_representation_file(
+            $settings,
+            $supplier_tax_code,
+            $invoice_no,
+            $template_code,
+            'PDF'
+        );
+
+        $pdf_request_payload = [
+            'supplierTaxCode' => $supplier_tax_code,
+            'invoiceNo' => $invoice_no,
+            'templateCode' => $template_code,
+            'fileType' => 'PDF',
+        ];
+        $pdf_endpoint = untrailingslashit($settings['api_base_url'] ?? '') . '/InvoiceAPI/InvoiceUtilsWS/getInvoiceRepresentationFile';
+
+        if (empty($pdf_result['success'])) {
+            $this->insert_log_record([
+                'invoice_id' => intval($latest['local_viettel_invoice_id'] ?? 0),
+                'sale_ledger_id' => $sale_ledger_id,
+                'local_ledger_code' => sanitize_text_field($latest['local_ledger_code'] ?? ''),
+                'step_name' => 'send_invoice_email',
+                'action_name' => 'send_invoice_email',
+                'endpoint' => $pdf_endpoint,
+                'request_payload' => wp_json_encode($pdf_request_payload, JSON_UNESCAPED_UNICODE),
+                'response_payload' => (string) ($pdf_result['response_text'] ?? ''),
+                'http_code' => intval($pdf_result['http_code'] ?? 0),
+                'error_message' => sanitize_text_field($pdf_result['message'] ?? 'Không lấy được file PDF hóa đơn.'),
+                'created_by' => $created_by,
+            ]);
+
+            wp_send_json_error([
+                'message' => $pdf_result['message'] ?? 'Không lấy được file PDF hóa đơn.',
+                'http_code' => intval($pdf_result['http_code'] ?? 0),
+            ], 400);
+            return;
+        }
+
+        $file_bytes = (string) ($pdf_result['file_bytes_base64'] ?? '');
+        if ($file_bytes === '') {
+            wp_send_json_error(['message' => 'API trả về thiếu fileToBytes.'], 400);
+            return;
+        }
+
+        $binary = base64_decode($file_bytes, true);
+        if ($binary === false || $binary === '') {
+            wp_send_json_error(['message' => 'Không giải mã được file PDF từ API Viettel.'], 400);
+            return;
+        }
+
+        $safe_invoice_no = preg_replace('/[^A-Za-z0-9\-_]/', '_', $invoice_no);
+        $file_name = $supplier_tax_code . '-' . $safe_invoice_no . '.pdf';
+        $temp_file = wp_tempnam($file_name);
+        if (empty($temp_file)) {
+            wp_send_json_error(['message' => 'Không tạo được file tạm để gửi email.'], 500);
+            return;
+        }
+
+        $written = file_put_contents($temp_file, $binary);
+        if ($written === false) {
+            @unlink($temp_file);
+            wp_send_json_error(['message' => 'Không ghi được file PDF tạm.'], 500);
+            return;
+        }
+
+        $subject = 'Hoa don dien tu ' . $invoice_no;
+        $body = "Xin chao,\n\n"
+            . "Gui ban file PDF hoa don dien tu.\n"
+            . "- Ma don: " . sanitize_text_field($latest['local_ledger_code'] ?? ('Sale #' . $sale_ledger_id)) . "\n"
+            . "- InvoiceNo: " . $invoice_no . "\n"
+            . "- Template: " . $template_code . "\n\n"
+            . "Email duoc gui tu he thong POS test.";
+
+        $mail_sent = wp_mail($to_email, $subject, $body, ['Content-Type: text/plain; charset=UTF-8'], [$temp_file]);
+        @unlink($temp_file);
+
+        if (!$mail_sent) {
+            $this->insert_log_record([
+                'invoice_id' => intval($latest['local_viettel_invoice_id'] ?? 0),
+                'sale_ledger_id' => $sale_ledger_id,
+                'local_ledger_code' => sanitize_text_field($latest['local_ledger_code'] ?? ''),
+                'step_name' => 'send_invoice_email',
+                'action_name' => 'send_invoice_email',
+                'endpoint' => 'wp_mail',
+                'request_payload' => wp_json_encode([
+                    'to_email' => $to_email,
+                    'subject' => $subject,
+                    'invoice_no' => $invoice_no,
+                    'file_name' => $file_name,
+                ], JSON_UNESCAPED_UNICODE),
+                'response_payload' => wp_json_encode([
+                    'mail_sent' => false,
+                    'pdf_http_code' => intval($pdf_result['http_code'] ?? 0),
+                ], JSON_UNESCAPED_UNICODE),
+                'http_code' => 0,
+                'error_message' => 'Gửi email thất bại. Kiểm tra cấu hình mail server/SMTP.',
+                'created_by' => $created_by,
+            ]);
+
+            wp_send_json_error(['message' => 'Gửi email thất bại. Kiểm tra cấu hình mail server/SMTP.'], 500);
+            return;
+        }
+
+        $this->insert_log_record([
+            'invoice_id' => intval($latest['local_viettel_invoice_id'] ?? 0),
+            'sale_ledger_id' => $sale_ledger_id,
+            'local_ledger_code' => sanitize_text_field($latest['local_ledger_code'] ?? ''),
+            'step_name' => 'send_invoice_email',
+            'action_name' => 'send_invoice_email',
+            'endpoint' => 'wp_mail',
+            'request_payload' => wp_json_encode([
+                'to_email' => $to_email,
+                'subject' => $subject,
+                'invoice_no' => $invoice_no,
+                'file_name' => $file_name,
+                'pdf_request' => $pdf_request_payload,
+            ], JSON_UNESCAPED_UNICODE),
+            'response_payload' => wp_json_encode([
+                'mail_sent' => true,
+                'pdf_http_code' => intval($pdf_result['http_code'] ?? 0),
+                'pdf_file_name' => $file_name,
+                'pdf_api_response' => $pdf_result['response'] ?? null,
+            ], JSON_UNESCAPED_UNICODE),
+            'http_code' => intval($pdf_result['http_code'] ?? 0),
+            'error_message' => '',
+            'created_by' => $created_by,
+        ]);
+
+        wp_send_json_success([
+            'message' => 'Đã gửi email hóa đơn thành công tới ' . $to_email,
+            'to_email' => $to_email,
+            'invoice_no' => $invoice_no,
+            'sale_ledger_id' => $sale_ledger_id,
+            'file_name' => $file_name,
+            'api_http_code' => intval($pdf_result['http_code'] ?? 0),
+        ]);
+    }
+
+    /**
+     * POS: xem trực tiếp PDF hóa đơn trong trình duyệt.
+     */
+    public function ajax_pos_preview_invoice_pdf()
+    {
+        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+        if (
+            empty($nonce)
+            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
+        ) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+            return;
+        }
+
+        if (!current_user_can('read')) {
+            wp_send_json_error(['message' => 'Bạn không có quyền xem PDF hóa đơn.'], 403);
+            return;
+        }
+
+        if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
+            wp_send_json_error(['message' => 'Chưa tìm thấy bảng theo dõi hóa đơn Viettel.'], 500);
+            return;
+        }
+
+        $sale_ledger_id = intval($_POST['sale_ledger_id'] ?? 0);
+        if ($sale_ledger_id <= 0) {
+            wp_send_json_error(['message' => 'Thiếu sale_ledger_id.'], 400);
+            return;
+        }
+
+        global $wpdb;
+        $created_by = get_current_user_id();
+        $latest = $wpdb->get_row(
+            $wpdb->prepare(
+                'SELECT local_viettel_invoice_id, sale_ledger_id, local_ledger_code, invoice_state, template_code, issue_response_payload
+                 FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . '
+                 WHERE sale_ledger_id = %d
+                 ORDER BY local_viettel_invoice_id DESC
+                 LIMIT 1',
+                $sale_ledger_id
+            ),
+            ARRAY_A
+        );
+
+        if (empty($latest)) {
+            wp_send_json_error(['message' => 'Không tìm thấy hóa đơn Viettel của đơn này.'], 404);
+            return;
+        }
+
+        if (sanitize_text_field($latest['invoice_state'] ?? '') !== 'done') {
+            wp_send_json_error(['message' => 'Chỉ xem PDF cho hóa đơn đã gửi CQT thành công.'], 400);
+            return;
+        }
+
+        $invoice_no = $this->extract_invoice_no_from_issue_payload($latest['issue_response_payload'] ?? '');
+        if ($invoice_no === '') {
+            wp_send_json_error(['message' => 'Không lấy được invoiceNo để tải file PDF.'], 400);
+            return;
+        }
+
+        $template_code = '1/1156';
+        $settings = self::get_settings();
+        $supplier_tax_code = sanitize_text_field($settings['supplier_tax_code'] ?? '');
+        if ($supplier_tax_code === '') {
+            wp_send_json_error(['message' => 'Thiếu MST nhà cung cấp trong cấu hình Viettel.'], 400);
+            return;
+        }
+
+        $pdf_result = $this->fetch_invoice_representation_file(
+            $settings,
+            $supplier_tax_code,
+            $invoice_no,
+            $template_code,
+            'PDF'
+        );
+
+        $pdf_request_payload = [
+            'supplierTaxCode' => $supplier_tax_code,
+            'invoiceNo' => $invoice_no,
+            'templateCode' => $template_code,
+            'fileType' => 'PDF',
+        ];
+        $pdf_endpoint = untrailingslashit($settings['api_base_url'] ?? '') . '/InvoiceAPI/InvoiceUtilsWS/getInvoiceRepresentationFile';
+
+        if (empty($pdf_result['success'])) {
+            $this->insert_log_record([
+                'invoice_id' => intval($latest['local_viettel_invoice_id'] ?? 0),
+                'sale_ledger_id' => $sale_ledger_id,
+                'local_ledger_code' => sanitize_text_field($latest['local_ledger_code'] ?? ''),
+                'step_name' => 'preview_invoice_pdf',
+                'action_name' => 'preview_invoice_pdf',
+                'endpoint' => $pdf_endpoint,
+                'request_payload' => wp_json_encode($pdf_request_payload, JSON_UNESCAPED_UNICODE),
+                'response_payload' => (string) ($pdf_result['response_text'] ?? ''),
+                'http_code' => intval($pdf_result['http_code'] ?? 0),
+                'error_message' => sanitize_text_field($pdf_result['message'] ?? 'Không lấy được file PDF hóa đơn.'),
+                'created_by' => $created_by,
+            ]);
+
+            wp_send_json_error([
+                'message' => $pdf_result['message'] ?? 'Không lấy được file PDF hóa đơn.',
+                'http_code' => intval($pdf_result['http_code'] ?? 0),
+            ], 400);
+            return;
+        }
+
+        $file_bytes = (string) ($pdf_result['file_bytes_base64'] ?? '');
+        if ($file_bytes === '') {
+            wp_send_json_error(['message' => 'API trả về thiếu fileToBytes.'], 400);
+            return;
+        }
+
+        $safe_invoice_no = preg_replace('/[^A-Za-z0-9\-_]/', '_', $invoice_no);
+        $file_name = $supplier_tax_code . '-' . $safe_invoice_no . '.pdf';
+
+        $this->insert_log_record([
+            'invoice_id' => intval($latest['local_viettel_invoice_id'] ?? 0),
+            'sale_ledger_id' => $sale_ledger_id,
+            'local_ledger_code' => sanitize_text_field($latest['local_ledger_code'] ?? ''),
+            'step_name' => 'preview_invoice_pdf',
+            'action_name' => 'preview_invoice_pdf',
+            'endpoint' => $pdf_endpoint,
+            'request_payload' => wp_json_encode($pdf_request_payload, JSON_UNESCAPED_UNICODE),
+            'response_payload' => wp_json_encode([
+                'http_code' => intval($pdf_result['http_code'] ?? 0),
+                'file_name' => $file_name,
+                'file_size_base64' => strlen($file_bytes),
+                'api_response' => $pdf_result['response'] ?? null,
+            ], JSON_UNESCAPED_UNICODE),
+            'http_code' => intval($pdf_result['http_code'] ?? 0),
+            'error_message' => '',
+            'created_by' => $created_by,
+        ]);
+
+        wp_send_json_success([
+            'message' => 'Đã lấy file PDF hóa đơn thành công.',
+            'sale_ledger_id' => $sale_ledger_id,
+            'invoice_no' => $invoice_no,
+            'file_name' => $file_name,
+            'mime_type' => 'application/pdf',
+            'file_bytes_base64' => $file_bytes,
+            'api_http_code' => intval($pdf_result['http_code'] ?? 0),
+        ]);
+    }
+
+    private function fetch_invoice_representation_file(array $settings, $supplier_tax_code, $invoice_no, $template_code, $file_type = 'PDF')
+    {
+        $base = untrailingslashit($settings['api_base_url'] ?? '');
+        if ($base === '') {
+            return [
+                'success' => false,
+                'message' => 'Thiếu api_base_url trong cấu hình Viettel.',
+            ];
+        }
+
+        $url = $base . '/InvoiceAPI/InvoiceUtilsWS/getInvoiceRepresentationFile';
+        $headers = [
+            'Content-Type' => 'application/json',
+        ];
+
+        if (($settings['auth_mode'] ?? 'basic') === 'token') {
+            $headers['Authorization'] = 'Bearer ' . ($settings['access_token'] ?? '');
+        } else {
+            $token = base64_encode(($settings['username'] ?? '') . ':' . ($settings['password'] ?? ''));
+            $headers['Authorization'] = 'Basic ' . $token;
+        }
+
+        $payload = [
+            'supplierTaxCode' => (string) $supplier_tax_code,
+            'invoiceNo' => (string) $invoice_no,
+            'templateCode' => (string) $template_code,
+            'fileType' => (string) $file_type,
+        ];
+
+        $response = wp_remote_post($url, [
+            'headers' => $headers,
+            'body' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+            'timeout' => 60,
+            'sslverify' => !empty($settings['verify_ssl']),
+        ]);
+
+        if (is_wp_error($response)) {
+            return [
+                'success' => false,
+                'message' => $response->get_error_message(),
+            ];
+        }
+
+        $http_code = intval(wp_remote_retrieve_response_code($response));
+        $response_text = (string) wp_remote_retrieve_body($response);
+        $decoded = json_decode($response_text, true);
+
+        if ($http_code < 200 || $http_code >= 300 || !is_array($decoded)) {
+            return [
+                'success' => false,
+                'message' => 'Lấy file hóa đơn thất bại (HTTP ' . $http_code . ').',
+                'http_code' => $http_code,
+                'response_text' => $response_text,
+            ];
+        }
+
+        $file_bytes = (string) ($decoded['fileToBytes'] ?? '');
+        if ($file_bytes === '') {
+            return [
+                'success' => false,
+                'message' => sanitize_text_field($decoded['description'] ?? $decoded['message'] ?? 'API không trả về fileToBytes.'),
+                'http_code' => $http_code,
+                'response_text' => $response_text,
+            ];
+        }
+
+        return [
+            'success' => true,
+            'http_code' => $http_code,
+            'file_bytes_base64' => $file_bytes,
+            'response' => $decoded,
+        ];
     }
 
     private function submit_invoice_payload($payload, $mode, $context = [])
@@ -639,13 +1354,36 @@ class TGS_Viettel_Invoice_Plugin
             $headers['Authorization'] = 'Basic ' . $token;
         }
 
-        $request_body = wp_json_encode($payload, JSON_UNESCAPED_UNICODE);
-        $response = wp_remote_post($url, [
-            'headers' => $headers,
-            'body' => $request_body,
-            'timeout' => 45,
-            'sslverify' => !empty($settings['verify_ssl']),
-        ]);
+        // send_cqt endpoint dùng form-urlencoded theo tài liệu thực tế Viettel
+        if ($mode === 'send_cqt') {
+            $start_date = sanitize_text_field($payload['startDate'] ?? '');
+            if ($start_date === '') {
+                $start_date = current_time('Y-m-d');
+            }
+
+            $form_params = [
+                'supplierTaxCode'  => $payload['supplierTaxCode'] ?? '',
+                'transactionUuid'  => $payload['transactionUuid'] ?? '',
+                'startDate'        => $start_date,
+                'endDate'          => sanitize_text_field($payload['endDate'] ?? $start_date),
+            ];
+            $headers['Content-Type'] = 'application/x-www-form-urlencoded';
+            $request_body = http_build_query($form_params);
+            $response = wp_remote_post($url, [
+                'headers' => $headers,
+                'body'    => $request_body,
+                'timeout' => 45,
+                'sslverify' => !empty($settings['verify_ssl']),
+            ]);
+        } else {
+            $request_body = wp_json_encode($payload, JSON_UNESCAPED_UNICODE);
+            $response = wp_remote_post($url, [
+                'headers' => $headers,
+                'body'    => $request_body,
+                'timeout' => 45,
+                'sslverify' => !empty($settings['verify_ssl']),
+            ]);
+        }
 
         $http_code = 0;
         $response_text = '';
@@ -751,7 +1489,7 @@ class TGS_Viettel_Invoice_Plugin
         }
 
         if ($mode === 'send_cqt') {
-            $required = ['supplierTaxCode', 'transactionUuid'];
+            $required = ['supplierTaxCode', 'transactionUuid', 'startDate'];
             foreach ($required as $field) {
                 if (!isset($payload[$field]) || $payload[$field] === '' || $payload[$field] === null) {
                     return 'Payload gửi CQT cần trường bắt buộc: ' . $field;
@@ -824,6 +1562,128 @@ class TGS_Viettel_Invoice_Plugin
         }
 
         return '';
+    }
+
+    private function extract_invoice_no_from_issue_payload($payload)
+    {
+        if (is_string($payload)) {
+            $decoded = json_decode($payload, true);
+            if (is_array($decoded)) {
+                $payload = $decoded;
+            }
+        }
+
+        if (!is_array($payload)) {
+            return '';
+        }
+
+        return sanitize_text_field($this->deep_pick($payload, [
+            'result.invoiceNo',
+            'data.invoiceNo',
+            'invoiceNo',
+        ]));
+    }
+
+    private function compute_under24_main_flags_for_sale_rows($rows)
+    {
+        if (
+            !is_array($rows)
+            || empty($rows)
+            || !defined('TGS_TABLE_LOCAL_LEDGER_ITEM')
+            || !defined('TGS_TABLE_LOCAL_PRODUCT_NAME')
+            || !defined('TGS_TABLE_GLOBAL_MILK_UNDER24M')
+        ) {
+            return [];
+        }
+
+        global $wpdb;
+
+        $sale_item_map = [];
+        $all_item_ids = [];
+
+        foreach ($rows as $row) {
+            $sale_ledger_id = intval($row['sale_ledger_id'] ?? 0);
+            $item_ids_json = $row['local_ledger_item_id'] ?? '';
+            $item_ids = is_string($item_ids_json) ? json_decode($item_ids_json, true) : [];
+            $item_ids = is_array($item_ids) ? array_values(array_filter(array_map('intval', $item_ids))) : [];
+            if ($sale_ledger_id <= 0 || empty($item_ids)) {
+                continue;
+            }
+
+            $sale_item_map[$sale_ledger_id] = $item_ids;
+            $all_item_ids = array_merge($all_item_ids, $item_ids);
+        }
+
+        $all_item_ids = array_values(array_unique(array_filter(array_map('intval', $all_item_ids))));
+        if (empty($all_item_ids)) {
+            return [];
+        }
+
+        $placeholders = implode(',', array_fill(0, count($all_item_ids), '%d'));
+        $items = $wpdb->get_results(
+            $wpdb->prepare(
+                'SELECT i.local_ledger_item_id, i.local_ledger_item_gift_type, p.local_product_sku
+                 FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
+                 LEFT JOIN ' . TGS_TABLE_LOCAL_PRODUCT_NAME . ' p ON p.local_product_name_id = i.local_product_name_id
+                 WHERE i.local_ledger_item_id IN (' . $placeholders . ')',
+                ...$all_item_ids
+            ),
+            ARRAY_A
+        );
+
+        if (empty($items)) {
+            return [];
+        }
+
+        $item_info_map = [];
+        $main_skus = [];
+        foreach ($items as $item) {
+            $item_id = intval($item['local_ledger_item_id'] ?? 0);
+            $is_gift = intval($item['local_ledger_item_gift_type'] ?? 0) === 1;
+            $sku = sanitize_text_field($item['local_product_sku'] ?? '');
+            $item_info_map[$item_id] = [
+                'is_gift' => $is_gift,
+                'sku' => $sku,
+            ];
+            if (!$is_gift && $sku !== '') {
+                $main_skus[] = $sku;
+            }
+        }
+
+        $main_skus = array_values(array_unique($main_skus));
+        if (empty($main_skus)) {
+            return [];
+        }
+
+        $sku_placeholders = implode(',', array_fill(0, count($main_skus), '%s'));
+        $under24_rows = $wpdb->get_col(
+            $wpdb->prepare(
+                'SELECT global_product_sku
+                 FROM ' . TGS_TABLE_GLOBAL_MILK_UNDER24M . '
+                 WHERE global_product_sku IN (' . $sku_placeholders . ')
+                   AND (is_deleted = 0 OR is_deleted IS NULL)',
+                ...$main_skus
+            )
+        );
+        $under24_sku_map = array_fill_keys(array_map('strval', $under24_rows ?: []), true);
+
+        $sale_flags = [];
+        foreach ($sale_item_map as $sale_ledger_id => $item_ids) {
+            $sale_flags[$sale_ledger_id] = false;
+            foreach ($item_ids as $item_id) {
+                $item_info = $item_info_map[$item_id] ?? null;
+                if (!$item_info || !empty($item_info['is_gift'])) {
+                    continue;
+                }
+
+                if (!empty($under24_sku_map[$item_info['sku'] ?? ''])) {
+                    $sale_flags[$sale_ledger_id] = true;
+                    break;
+                }
+            }
+        }
+
+        return $sale_flags;
     }
 
     private function insert_invoice_record($data)
@@ -1449,15 +2309,21 @@ class TGS_Viettel_Invoice_Plugin
         }
 
         return $this->deep_pick($response, [
+            'result.transactionID',
             'result.transactionUuid',
             'result.transactionUUID',
             'result.transactionId',
+            'result.invoiceNo',
+            'data.transactionID',
             'data.transactionUuid',
             'data.transactionUUID',
             'data.transactionId',
+            'data.invoiceNo',
+            'transactionID',
             'transactionUuid',
             'transactionUUID',
             'transactionId',
+            'invoiceNo',
         ]);
     }
 

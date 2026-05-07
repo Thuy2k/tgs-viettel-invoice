@@ -1036,32 +1036,83 @@ class TGS_Viettel_Invoice_Plugin
         }
 
         $safe_invoice_no = preg_replace('/[^A-Za-z0-9\-_]/', '_', $invoice_no);
-        $file_name = $supplier_tax_code . '-' . $safe_invoice_no . '.pdf';
-        $temp_file = wp_tempnam($file_name);
+        $pdf_file_name = $safe_invoice_no . '.pdf';
+        $temp_file = $this->create_invoice_email_attachment_temp_file($pdf_file_name, $binary);
         if (empty($temp_file)) {
-            wp_send_json_error(['message' => 'Không tạo được file tạm để gửi email.'], 500);
+            wp_send_json_error(['message' => 'Không tạo được file đính kèm PDF tạm.'], 500);
             return;
         }
 
-        $written = file_put_contents($temp_file, $binary);
-        if ($written === false) {
-            @unlink($temp_file);
-            wp_send_json_error(['message' => 'Không ghi được file PDF tạm.'], 500);
-            return;
+        $attachments = [$temp_file];
+        $xml_file_name = '';
+        $xml_result = $this->fetch_invoice_representation_file(
+            $settings,
+            $supplier_tax_code,
+            $invoice_no,
+            $template_code,
+            'XML'
+        );
+        if (!empty($xml_result['success'])) {
+            $xml_file_bytes = (string) ($xml_result['file_bytes_base64'] ?? '');
+            $xml_binary = base64_decode($xml_file_bytes, true);
+            if ($xml_binary !== false && $xml_binary !== '') {
+                $xml_file_name = $safe_invoice_no . '.xml';
+                $temp_xml_file = $this->create_invoice_email_attachment_temp_file($xml_file_name, $xml_binary);
+                if (!empty($temp_xml_file)) {
+                    $attachments[] = $temp_xml_file;
+                }
+            }
         }
 
-        $subject = 'Hoa don dien tu ' . $invoice_no;
-        $body = "Xin chao,\n\n"
-            . "Gui ban file PDF hoa don dien tu.\n"
-            . "- Ma don: " . sanitize_text_field($latest['local_ledger_code'] ?? ('Sale #' . $sale_ledger_id)) . "\n"
-            . "- InvoiceNo: " . $invoice_no . "\n"
-            . "- Template: " . $template_code . "\n\n"
-            . "Email duoc gui tu he thong POS test.";
+        $sale_code = sanitize_text_field($latest['local_ledger_code'] ?? ('Sale #' . $sale_ledger_id));
+        $issued_at = current_time('d/m/Y H:i:s');
+        $invoice_search_url = 'https://vinvoice.viettel.vn/utilities/invoice-search';
+        $quick_view_url = $invoice_search_url;
 
-        $mail_sent = wp_mail($to_email, $subject, $body, ['Content-Type: text/plain; charset=UTF-8'], [$temp_file]);
-        @unlink($temp_file);
+        $subject = 'Hóa đơn điện tử ' . $invoice_no;
+        $body = '<div style="font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.6;color:#222;">'
+            . '<p>Kính gửi Quý Công Ty/Khách hàng,</p>'
+            . '<p>Chúng tôi xin gửi Quý khách hàng hóa đơn điện tử số <strong>' . esc_html($invoice_no) . '</strong>'
+            . ' của đơn <strong>' . esc_html($sale_code) . '</strong>'
+            . ' lập ngày <strong>' . esc_html($issued_at) . '</strong>'
+            . ' mã số thuế bên bán <strong>' . esc_html($supplier_tax_code) . '</strong>.</p>'
+            . '<p>Hóa đơn điện tử của Quý khách được gửi qua mail theo file kèm theo.</p>'
+            . '<p>Quý khách có thể tra cứu lại hóa đơn điện tử tại '
+            . '<a href="' . esc_url($invoice_search_url) . '">' . esc_html($invoice_search_url) . '</a>'
+            . ' hoặc truy cập nhanh <a href="' . esc_url($quick_view_url) . '">tại đây</a> để tải và xem hóa đơn.</p>'
+            . '<p>Xin trân trọng cảm ơn Quý khách đã sử dụng sản phẩm/dịch vụ của chúng tôi.</p>'
+            . '</div>';
+
+        $GLOBALS['tgs_resend_last_error'] = null;
+        $wp_mail_failed_error = '';
+        $wp_mail_failed_handler = static function ($wp_error) use (&$wp_mail_failed_error) {
+            if (is_wp_error($wp_error)) {
+                $wp_mail_failed_error = $wp_error->get_error_message();
+            }
+        };
+        add_action('wp_mail_failed', $wp_mail_failed_handler, 10, 1);
+
+        $mail_sent = wp_mail($to_email, $subject, $body, ['Content-Type: text/html; charset=UTF-8'], $attachments);
+
+        remove_action('wp_mail_failed', $wp_mail_failed_handler, 10);
+        // Không xóa ngay file đính kèm: một số mail transport gửi async/queue
+        // sẽ đọc file sau khi wp_mail() trả về. Cleanup theo tuổi sẽ chạy ở helper.
+        $this->cleanup_old_invoice_email_attachments(2);
 
         if (!$mail_sent) {
+            global $phpmailer;
+            $mail_error_message = '';
+            if (!empty($GLOBALS['tgs_resend_last_error'])) {
+                $mail_error_message = (string) $GLOBALS['tgs_resend_last_error'];
+            } elseif ($wp_mail_failed_error !== '') {
+                $mail_error_message = $wp_mail_failed_error;
+            } elseif (isset($phpmailer) && is_object($phpmailer) && !empty($phpmailer->ErrorInfo)) {
+                $mail_error_message = (string) $phpmailer->ErrorInfo;
+            }
+            if ($mail_error_message === '') {
+                $mail_error_message = 'wp_mail returned false';
+            }
+
             $this->insert_log_record([
                 'invoice_id' => intval($latest['local_viettel_invoice_id'] ?? 0),
                 'sale_ledger_id' => $sale_ledger_id,
@@ -1073,18 +1124,20 @@ class TGS_Viettel_Invoice_Plugin
                     'to_email' => $to_email,
                     'subject' => $subject,
                     'invoice_no' => $invoice_no,
-                    'file_name' => $file_name,
+                    'file_name' => $pdf_file_name,
                 ], JSON_UNESCAPED_UNICODE),
                 'response_payload' => wp_json_encode([
                     'mail_sent' => false,
                     'pdf_http_code' => intval($pdf_result['http_code'] ?? 0),
+                    'xml_http_code' => intval($xml_result['http_code'] ?? 0),
+                    'mail_error' => $mail_error_message,
                 ], JSON_UNESCAPED_UNICODE),
                 'http_code' => 0,
-                'error_message' => 'Gửi email thất bại. Kiểm tra cấu hình mail server/SMTP.',
+                'error_message' => sanitize_text_field($mail_error_message),
                 'created_by' => $created_by,
             ]);
 
-            wp_send_json_error(['message' => 'Gửi email thất bại. Kiểm tra cấu hình mail server/SMTP.'], 500);
+            wp_send_json_error(['message' => $mail_error_message], 500);
             return;
         }
 
@@ -1099,14 +1152,18 @@ class TGS_Viettel_Invoice_Plugin
                 'to_email' => $to_email,
                 'subject' => $subject,
                 'invoice_no' => $invoice_no,
-                'file_name' => $file_name,
+                'file_name' => $pdf_file_name,
+                'xml_file_name' => $xml_file_name,
                 'pdf_request' => $pdf_request_payload,
             ], JSON_UNESCAPED_UNICODE),
             'response_payload' => wp_json_encode([
                 'mail_sent' => true,
                 'pdf_http_code' => intval($pdf_result['http_code'] ?? 0),
-                'pdf_file_name' => $file_name,
+                'xml_http_code' => intval($xml_result['http_code'] ?? 0),
+                'pdf_file_name' => $pdf_file_name,
+                'xml_file_name' => $xml_file_name,
                 'pdf_api_response' => $pdf_result['response'] ?? null,
+                'xml_api_response' => $xml_result['response'] ?? null,
             ], JSON_UNESCAPED_UNICODE),
             'http_code' => intval($pdf_result['http_code'] ?? 0),
             'error_message' => '',
@@ -1118,7 +1175,8 @@ class TGS_Viettel_Invoice_Plugin
             'to_email' => $to_email,
             'invoice_no' => $invoice_no,
             'sale_ledger_id' => $sale_ledger_id,
-            'file_name' => $file_name,
+            'file_name' => $pdf_file_name,
+            'xml_file_name' => $xml_file_name,
             'api_http_code' => intval($pdf_result['http_code'] ?? 0),
         ]);
     }
@@ -1340,6 +1398,61 @@ class TGS_Viettel_Invoice_Plugin
             'file_bytes_base64' => $file_bytes,
             'response' => $decoded,
         ];
+    }
+
+    private function create_invoice_email_attachment_temp_file($file_name, $binary_content)
+    {
+        $uploads = wp_upload_dir();
+        if (!empty($uploads['error'])) {
+            return '';
+        }
+
+        $dir = trailingslashit($uploads['basedir']) . 'tgs-invoice-email-attachments';
+        if (!wp_mkdir_p($dir)) {
+            return '';
+        }
+
+        $safe_name = sanitize_file_name((string) $file_name);
+        if ($safe_name === '') {
+            $safe_name = 'invoice-attachment.bin';
+        }
+
+        $path = trailingslashit($dir) . time() . '-' . wp_generate_password(6, false, false) . '-' . $safe_name;
+        $written = file_put_contents($path, $binary_content);
+        if ($written === false) {
+            return '';
+        }
+
+        return $path;
+    }
+
+    private function cleanup_old_invoice_email_attachments($max_age_days = 2)
+    {
+        $uploads = wp_upload_dir();
+        if (!empty($uploads['error'])) {
+            return;
+        }
+
+        $dir = trailingslashit($uploads['basedir']) . 'tgs-invoice-email-attachments';
+        if (!is_dir($dir)) {
+            return;
+        }
+
+        $cutoff = time() - (max(1, intval($max_age_days)) * DAY_IN_SECONDS);
+        $files = glob(trailingslashit($dir) . '*');
+        if (!is_array($files)) {
+            return;
+        }
+
+        foreach ($files as $file) {
+            if (!is_file($file)) {
+                continue;
+            }
+            $mtime = @filemtime($file);
+            if ($mtime !== false && $mtime < $cutoff) {
+                @unlink($file);
+            }
+        }
     }
 
     private function submit_invoice_payload($payload, $mode, $context = [])

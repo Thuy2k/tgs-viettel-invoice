@@ -570,9 +570,15 @@ class TGS_Viettel_Invoice_Plugin
         global $wpdb;
 
         $status_filter = isset($_POST['status']) ? sanitize_text_field(wp_unslash($_POST['status'])) : 'all';
-        $age_filter = isset($_POST['age_filter']) ? sanitize_text_field(wp_unslash($_POST['age_filter'])) : 'all';
-        // Theo yêu cầu vận hành POS: luôn lấy 100 đơn gần nhất để có tab "Chưa gửi" xử lý về sau.
-        $limit = 100;
+        $age_filter    = isset($_POST['age_filter']) ? sanitize_text_field(wp_unslash($_POST['age_filter'])) : 'all';
+        $date_from     = isset($_POST['date_from']) ? sanitize_text_field(wp_unslash($_POST['date_from'])) : '';
+        $date_to       = isset($_POST['date_to'])   ? sanitize_text_field(wp_unslash($_POST['date_to']))   : '';
+
+        // Validate YYYY-MM-DD format
+        if ($date_from && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date_from)) $date_from = '';
+        if ($date_to   && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date_to))   $date_to   = '';
+
+        $limit = 500;
         $sale_order_type = defined('TGS_LEDGER_TYPE_SALE_ORDER') ? intval(TGS_LEDGER_TYPE_SALE_ORDER) : 10;
 
         $sql = "SELECT
@@ -603,11 +609,23 @@ class TGS_Viettel_Invoice_Plugin
                     ) vim ON vim.max_id = vi1.local_viettel_invoice_id
                 ) vi ON vi.sale_ledger_id = l.local_ledger_id
                 WHERE l.local_ledger_type = %d
-                  AND (l.is_deleted = 0 OR l.is_deleted IS NULL)
-                ORDER BY l.local_ledger_id DESC
-                LIMIT %d";
+                  AND (l.is_deleted = 0 OR l.is_deleted IS NULL)";
 
-        $rows = $wpdb->get_results($wpdb->prepare($sql, $sale_order_type, $limit), ARRAY_A);
+        $prepare_args = [$sale_order_type];
+
+        if ($date_from) {
+            $sql .= " AND l.created_at >= %s";
+            $prepare_args[] = $date_from . ' 00:00:00';
+        }
+        if ($date_to) {
+            $sql .= " AND l.created_at <= %s";
+            $prepare_args[] = $date_to . ' 23:59:59';
+        }
+
+        $sql .= " ORDER BY l.local_ledger_id DESC LIMIT %d";
+        $prepare_args[] = $limit;
+
+        $rows = $wpdb->get_results($wpdb->prepare($sql, $prepare_args), ARRAY_A);
 
                 $under24_flags = $this->compute_under24_main_flags_for_sale_rows($rows);
 
@@ -700,10 +718,12 @@ class TGS_Viettel_Invoice_Plugin
         }
 
         wp_send_json_success([
-            'items' => is_array($rows) ? $rows : [],
+            'items'         => is_array($rows) ? $rows : [],
             'status_filter' => $status_filter,
-            'age_filter' => $age_filter,
-            'age_counts' => $age_counts,
+            'age_filter'    => $age_filter,
+            'date_from'     => $date_from,
+            'date_to'       => $date_to,
+            'age_counts'    => $age_counts,
             'status_counts' => $status_counts,
         ]);
     }

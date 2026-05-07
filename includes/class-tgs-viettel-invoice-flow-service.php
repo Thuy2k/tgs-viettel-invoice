@@ -163,8 +163,6 @@ class TGS_Viettel_Invoice_Flow_Service
         }
 
         $filtered_gifts = [];
-        $gifts_by_parent_sku = [];
-        $orphan_gifts = [];
         foreach ($gift_items as $gift_item) {
             $gift_sku = (string) ($gift_item['sku'] ?? '');
             $parent_sku = trim((string) ($gift_item['gift_parent_sku'] ?? ''));
@@ -180,36 +178,35 @@ class TGS_Viettel_Invoice_Flow_Service
             }
 
             $filtered_gifts[] = $gift_item;
-            if ($parent_sku !== '') {
-                if (!isset($gifts_by_parent_sku[$parent_sku])) {
-                    $gifts_by_parent_sku[$parent_sku] = [];
-                }
-                $gifts_by_parent_sku[$parent_sku][] = $gift_item;
+        }
+
+        $gift_positive_price = [];
+        $gift_zero_price = [];
+        foreach ($filtered_gifts as $gift_item) {
+            $gift_unit_price = floatval($gift_item['unit_price_after_discount'] ?? 0);
+            if ($gift_unit_price > 0) {
+                $gift_positive_price[] = $gift_item;
             } else {
-                $orphan_gifts[] = $gift_item;
+                $gift_zero_price[] = $gift_item;
             }
         }
 
+        // Thu tu line item gui thue (de tranh xen ke gay nham):
+        // 1) Hang chinh tren 24 thang
+        // 2) Hang KM don gia sau khuyen mai > 0
+        // 3) Hang tang/KM don gia = 0
+        // 4) Hang chinh duoi 24 thang (luon day xuong cuoi)
         $sorted_items = [];
         foreach ($main_normal as $main_item) {
             $sorted_items[] = $main_item;
-            $main_sku = trim((string) ($main_item['sku'] ?? ''));
-            if ($main_sku !== '' && !empty($gifts_by_parent_sku[$main_sku])) {
-                foreach ($gifts_by_parent_sku[$main_sku] as $gift_item) {
-                    $sorted_items[] = $gift_item;
-                }
-                unset($gifts_by_parent_sku[$main_sku]);
-            }
         }
 
-        foreach ($orphan_gifts as $gift_item) {
+        foreach ($gift_positive_price as $gift_item) {
             $sorted_items[] = $gift_item;
         }
 
-        foreach ($gifts_by_parent_sku as $gift_items_of_unknown_main) {
-            foreach ($gift_items_of_unknown_main as $gift_item) {
-                $sorted_items[] = $gift_item;
-            }
+        foreach ($gift_zero_price as $gift_item) {
+            $sorted_items[] = $gift_item;
         }
 
         foreach ($main_under24 as $item) {

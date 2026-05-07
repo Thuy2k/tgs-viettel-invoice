@@ -240,7 +240,13 @@ class TGS_Viettel_Invoice_Plugin
             wp_send_json_error(['message' => 'Ban khong co quyen.'], 403);
         }
 
-        $mode = isset($_POST['mode']) && $_POST['mode'] === 'issue' ? 'issue' : 'draft';
+        $mode = 'draft';
+        if (isset($_POST['mode'])) {
+            $input_mode = sanitize_text_field(wp_unslash($_POST['mode']));
+            if (in_array($input_mode, ['draft', 'issue', 'cancel'], true)) {
+                $mode = $input_mode;
+            }
+        }
         $payload_text = isset($_POST['payload_json']) ? wp_unslash($_POST['payload_json']) : '';
 
         if (empty($payload_text)) {
@@ -267,7 +273,11 @@ class TGS_Viettel_Invoice_Plugin
     private function submit_invoice_payload($payload, $mode, $context = [])
     {
         $settings = self::get_settings();
-        $validate_error = $this->validate_before_send($settings, $payload);
+        if ($mode === 'cancel' && empty($payload['supplierTaxCode']) && !empty($settings['supplier_tax_code'])) {
+            $payload['supplierTaxCode'] = $settings['supplier_tax_code'];
+        }
+
+        $validate_error = $this->validate_before_send($settings, $payload, $mode);
         if (!empty($validate_error)) {
             return [
                 'success' => false,
@@ -329,7 +339,7 @@ class TGS_Viettel_Invoice_Plugin
 
         $this->insert_log_record([
             'invoice_id' => $invoice_id,
-            'action_name' => ($mode === 'issue') ? 'create_invoice' : 'create_draft',
+            'action_name' => ($mode === 'issue') ? 'create_invoice' : (($mode === 'cancel') ? 'cancel_invoice' : 'create_draft'),
             'endpoint' => $url,
             'request_headers' => wp_json_encode($this->mask_headers_for_log($headers), JSON_UNESCAPED_UNICODE),
             'request_payload' => $request_body,
@@ -351,14 +361,14 @@ class TGS_Viettel_Invoice_Plugin
 
         return [
             'success' => true,
-            'message' => 'Gui len Viettel thanh cong.',
+            'message' => ($mode === 'cancel') ? 'Gui huy hoa don thanh cong.' : 'Gui len Viettel thanh cong.',
             'invoice_record_id' => $invoice_id,
             'http_code' => $http_code,
             'response' => $response_data ?: $response_text,
         ];
     }
 
-    private function validate_before_send($settings, $payload)
+    private function validate_before_send($settings, $payload, $mode = 'draft')
     {
         if (empty($settings['supplier_tax_code'])) {
             return 'Thieu MST nha cung cap trong cau hinh.';
@@ -372,6 +382,21 @@ class TGS_Viettel_Invoice_Plugin
             return 'Ban chua cau hinh username/password.';
         }
 
+        if ($mode === 'cancel') {
+            $required = ['supplierTaxCode', 'invoiceNo', 'templateCode', 'strIssueDate', 'reason'];
+            foreach ($required as $field) {
+                if (!isset($payload[$field]) || $payload[$field] === '' || $payload[$field] === null) {
+                    return 'Payload huy can truong bat buoc: ' . $field;
+                }
+            }
+
+            if (mb_strlen((string) $payload['reason']) > 255) {
+                return 'Truong reason toi da 255 ky tu.';
+            }
+
+            return '';
+        }
+
         if (!isset($payload['generalInvoiceInfo']) || !isset($payload['itemInfo']) || !isset($payload['summarizeInfo'])) {
             return 'Payload can co generalInvoiceInfo, itemInfo, summarizeInfo.';
         }
@@ -382,6 +407,10 @@ class TGS_Viettel_Invoice_Plugin
     private function build_api_url($settings, $mode, $supplier_tax_code)
     {
         $base = untrailingslashit($settings['api_base_url']);
+        if ($mode === 'cancel') {
+            return $base . '/InvoiceAPI/InvoiceWS/deleteInvoice';
+        }
+
         $path = ($mode === 'issue')
             ? 'InvoiceAPI/InvoiceWS/createInvoice/'
             : 'InvoiceAPI/InvoiceWS/createOrUpdateInvoiceDraft/';
@@ -444,7 +473,7 @@ class TGS_Viettel_Invoice_Plugin
 
         $invoice_state = !empty($data['error_message'])
             ? 'error'
-            : (($data['mode'] === 'issue') ? 'issued' : 'draft');
+            : (($data['mode'] === 'issue') ? 'issued' : (($data['mode'] === 'cancel') ? 'canceled' : 'draft'));
 
         $general = isset($payload['generalInvoiceInfo']) && is_array($payload['generalInvoiceInfo']) ? $payload['generalInvoiceInfo'] : [];
         $buyer = isset($payload['buyerInfo']) && is_array($payload['buyerInfo']) ? $payload['buyerInfo'] : [];
@@ -620,9 +649,18 @@ class TGS_Viettel_Invoice_Plugin
             ],
         ];
 
+        $cancel_payload_sample = [
+            'supplierTaxCode' => $settings['supplier_tax_code'],
+            'invoiceNo' => 'K24TXM4',
+            'templateCode' => $settings['default_template_code'] ?: '1/770',
+            'strIssueDate' => 1734075029000,
+            'reason' => 'Huy hoa don de tao lai dung thong tin',
+        ];
+
         return [
             'settings' => $settings,
             'sample_json' => wp_json_encode($payload_sample, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE),
+            'cancel_sample_json' => wp_json_encode($cancel_payload_sample, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE),
             'recent_invoices' => $this->get_recent_invoices(20),
         ];
     }

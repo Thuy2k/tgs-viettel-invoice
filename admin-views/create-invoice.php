@@ -10,13 +10,14 @@ if (!function_exists('tgs_viettel_invoice')) {
 
 $view_data = tgs_viettel_invoice()->get_create_view_data();
 $sample_json = $view_data['sample_json'];
+$cancel_sample_json = $view_data['cancel_sample_json'];
 $recent_invoices = $view_data['recent_invoices'];
 ?>
 
 <div class="container-fluid py-3" id="tgs-viettel-create-root">
     <div class="alert alert-primary">
         <h5 class="mb-2">Tao hoa don Viettel</h5>
-        <div class="mb-1">Man hinh nay cho phep gui truc tiep JSON len Viettel theo 2 che do: nhap va phat hanh.</div>
+        <div class="mb-1">Man hinh nay cho phep gui truc tiep JSON len Viettel theo 3 che do: nhap, phat hanh va huy hoa don.</div>
         <div class="mb-0">Luu y: gia tri dong hang nen la gia sau khuyen mai. Hang tang co don gia = 0.</div>
     </div>
 
@@ -28,6 +29,9 @@ $recent_invoices = $view_data['recent_invoices'];
                 </li>
                 <li class="nav-item" role="presentation">
                     <button class="nav-link" id="tab-issue" data-bs-toggle="tab" data-bs-target="#pane-issue" type="button" role="tab">Tao phat hanh</button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="tab-cancel" data-bs-toggle="tab" data-bs-target="#pane-cancel" type="button" role="tab">Huy hoa don</button>
                 </li>
             </ul>
 
@@ -47,6 +51,18 @@ $recent_invoices = $view_data['recent_invoices'];
                     <div class="d-flex gap-2 mt-3">
                         <button type="button" class="btn btn-danger tgs-viettel-send-btn" data-mode="issue">Gui phat hanh</button>
                         <button type="button" class="btn btn-outline-secondary tgs-viettel-fill-sample" data-target="#tgs-viettel-payload-issue">Nap lai JSON mau</button>
+                    </div>
+                </div>
+
+                <div class="tab-pane fade" id="pane-cancel" role="tabpanel">
+                    <label class="form-label fw-semibold">Payload JSON (huy hoa don)</label>
+                    <textarea class="form-control font-monospace" id="tgs-viettel-payload-cancel" rows="12"><?php echo esc_textarea($cancel_sample_json); ?></textarea>
+                    <textarea class="d-none" id="tgs-viettel-cancel-sample-source"><?php echo esc_textarea($cancel_sample_json); ?></textarea>
+                    <div class="small text-muted mt-2">Bat buoc: supplierTaxCode, invoiceNo, templateCode, strIssueDate (milliseconds), reason.</div>
+                    <div class="d-flex gap-2 mt-3">
+                        <button type="button" class="btn btn-warning tgs-viettel-send-btn" data-mode="cancel">Gui huy hoa don</button>
+                        <button type="button" class="btn btn-outline-secondary" id="tgs-viettel-reset-cancel-sample">Nap lai JSON huy mau</button>
+                        <button type="button" class="btn btn-outline-info" id="tgs-viettel-fill-cancel-now">Cap nhat strIssueDate = hien tai</button>
                     </div>
                 </div>
             </div>

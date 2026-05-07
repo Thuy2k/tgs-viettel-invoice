@@ -106,7 +106,12 @@
     }
 
     function sendPayload(mode) {
-        var selector = mode === 'issue' ? '#tgs-viettel-payload-issue' : '#tgs-viettel-payload-draft';
+        var selector = '#tgs-viettel-payload-draft';
+        if (mode === 'issue') {
+            selector = '#tgs-viettel-payload-issue';
+        } else if (mode === 'cancel') {
+            selector = '#tgs-viettel-payload-cancel';
+        }
         var payload = $(selector).val();
 
         $('#tgs-viettel-response-status').text('Dang gui request...');
@@ -145,7 +150,10 @@
     });
 
     $(document).on('click', '.tgs-viettel-send-btn', function () {
-        var mode = $(this).data('mode') === 'issue' ? 'issue' : 'draft';
+        var mode = $(this).data('mode');
+        if (['draft', 'issue', 'cancel'].indexOf(mode) === -1) {
+            mode = 'draft';
+        }
         sendPayload(mode);
     });
 
@@ -155,5 +163,33 @@
         if ($(source).length && $(target).length) {
             $(target).val($(source).val());
         }
+    });
+
+    $(document).on('click', '#tgs-viettel-reset-cancel-sample', function () {
+        var sample = $('#tgs-viettel-cancel-sample-source').val();
+        if ($('#tgs-viettel-payload-cancel').length) {
+            $('#tgs-viettel-payload-cancel').val(sample || '{}');
+        }
+    });
+
+    $(document).on('click', '#tgs-viettel-fill-cancel-now', function () {
+        var $box = $('#tgs-viettel-payload-cancel');
+        if (!$box.length) {
+            return;
+        }
+
+        var text = $box.val() || '{}';
+        var parsed;
+
+        try {
+            parsed = JSON.parse(text);
+        } catch (e) {
+            $('#tgs-viettel-response-status').removeClass('text-success').addClass('text-danger').text('JSON huy khong hop le, vui long sua JSON truoc.');
+            return;
+        }
+
+        parsed.strIssueDate = Date.now();
+        $box.val(JSON.stringify(parsed, null, 2));
+        $('#tgs-viettel-response-status').removeClass('text-danger').addClass('text-success').text('Da cap nhat strIssueDate theo thoi gian hien tai.');
     });
 })(jQuery);

@@ -63,10 +63,22 @@ class TGS_Viettel_Invoice_Flow_Service
             ];
         }
 
+        $has_price_after_discount = $this->local_ledger_item_column_exists('local_ledger_item_price_after_discount');
+        $has_under24_promo_danger = $this->local_ledger_item_column_exists('local_ledger_item_is_under24_promo_danger');
+
+        $optional_selects = [];
+        if ($has_price_after_discount) {
+            $optional_selects[] = 'i.local_ledger_item_price_after_discount';
+        }
+        if ($has_under24_promo_danger) {
+            $optional_selects[] = 'i.local_ledger_item_is_under24_promo_danger';
+        }
+        $optional_select_sql = empty($optional_selects) ? '' : ', ' . implode(', ', $optional_selects);
+
         $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
         $items = $wpdb->get_results(
             $wpdb->prepare(
-                'SELECT i.local_ledger_item_id, i.local_product_name_id, i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price,
+                'SELECT i.local_ledger_item_id, i.local_product_name_id, i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price' . $optional_select_sql . ',
                         p.local_product_name, p.local_product_sku, p.local_product_unit
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  LEFT JOIN ' . TGS_TABLE_LOCAL_PRODUCT_NAME . ' p ON p.local_product_name_id = i.local_product_name_id
@@ -80,12 +92,17 @@ class TGS_Viettel_Invoice_Flow_Service
         $source_items = [];
         foreach ($items as $item) {
             $quantity = floatval($item['quantity']);
-            $unit_price = floatval($item['price']);
+            $unit_price = isset($item['local_ledger_item_price_after_discount'])
+                && $item['local_ledger_item_price_after_discount'] !== null
+                && $item['local_ledger_item_price_after_discount'] !== ''
+                ? floatval($item['local_ledger_item_price_after_discount'])
+                : floatval($item['price']);
 
             $source_items[] = [
                 'ledger_item_id' => intval($item['local_ledger_item_id']),
                 'product_id' => intval($item['local_product_name_id']),
                 'is_gift' => intval($item['local_ledger_item_gift_type'] ?? 0) === 1,
+                'is_under24_promo_danger' => intval($item['local_ledger_item_is_under24_promo_danger'] ?? 0) === 1,
                 'gift_parent_sku' => $this->extract_gift_parent_sku($item['local_ledger_item_meta'] ?? ''),
                 'sku' => (string) ($item['local_product_sku'] ?? ''),
                 'item_name' => (string) ($item['local_product_name'] ?? ''),
@@ -143,6 +160,10 @@ class TGS_Viettel_Invoice_Flow_Service
         $under24_main_skus = [];
 
         foreach ($items as $item) {
+            if (!empty($item['is_under24_promo_danger'])) {
+                continue;
+            }
+
             $is_gift = !empty($item['is_gift']);
             $sku = (string) ($item['sku'] ?? '');
             $is_under24 = isset($under24_lookup[$sku]);
@@ -435,5 +456,30 @@ class TGS_Viettel_Invoice_Flow_Service
         }
 
         return array_values(array_unique(array_map('strval', $rows)));
+    }
+
+    private function local_ledger_item_column_exists($column_name)
+    {
+        global $wpdb;
+
+        static $column_cache = [];
+
+        $column_name = sanitize_key($column_name);
+        if ($column_name === '') {
+            return false;
+        }
+
+        $table = TGS_TABLE_LOCAL_LEDGER_ITEM;
+        $cache_key = $table . '|' . $column_name;
+        if (array_key_exists($cache_key, $column_cache)) {
+            return $column_cache[$cache_key];
+        }
+
+        $result = $wpdb->get_var(
+            $wpdb->prepare("SHOW COLUMNS FROM `{$table}` LIKE %s", $column_name)
+        );
+
+        $column_cache[$cache_key] = !empty($result);
+        return $column_cache[$cache_key];
     }
 }

@@ -1129,6 +1129,7 @@ class TGS_Viettel_Invoice_Plugin
             'sale_ledger_id' => $sale_ledger_id,
             'sale_code' => sanitize_text_field($latest['local_ledger_code'] ?? ''),
             'employee_id' => $created_by,
+            'excluded_item_ids' => $this->parse_excluded_item_ids_from_post(),
         ], $settings);
 
         wp_send_json_success([
@@ -2216,6 +2217,23 @@ class TGS_Viettel_Invoice_Plugin
                 return;
             }
 
+            // Áp dụng danh sách loại trừ trực tiếp từ frontend (belt-and-suspenders, độc lập với DB)
+            $excluded_ids_raw = sanitize_text_field($_POST['excluded_item_ids'] ?? '');
+            if ($excluded_ids_raw !== '' && $excluded_ids_raw !== '[]') {
+                $excluded_ids = json_decode($excluded_ids_raw, true);
+                if (is_array($excluded_ids) && !empty($excluded_ids)) {
+                    $excluded_ids_map = array_fill_keys(array_map('intval', array_filter($excluded_ids)), true);
+                    if (!empty($excluded_ids_map)) {
+                        foreach ($source_result['payload']['items'] as &$src_item) {
+                            if (isset($excluded_ids_map[intval($src_item['ledger_item_id'] ?? 0)])) {
+                                $src_item['is_under24_promo_danger'] = true;
+                            }
+                        }
+                        unset($src_item);
+                    }
+                }
+            }
+
             // Bước 2: Lọc + sắp xếp items theo quy tắc thuế
             $filtered_result = $this->flow_service->filter_and_sort_items_for_tax($source_result['payload']);
             if (empty($filtered_result['success'])) {
@@ -2400,6 +2418,19 @@ class TGS_Viettel_Invoice_Plugin
         $this->run_auto_issue_cqt_flow($sale_data, $settings);
     }
 
+    private function parse_excluded_item_ids_from_post()
+    {
+        $raw = sanitize_text_field($_POST['excluded_item_ids'] ?? '');
+        if ($raw === '' || $raw === '[]') {
+            return [];
+        }
+        $ids = json_decode($raw, true);
+        if (!is_array($ids) || empty($ids)) {
+            return [];
+        }
+        return array_values(array_filter(array_map('intval', $ids)));
+    }
+
     private function run_auto_issue_cqt_flow($sale_data, $settings)
     {
         $sale_ledger_id = intval($sale_data['sale_ledger_id'] ?? 0);
@@ -2420,6 +2451,22 @@ class TGS_Viettel_Invoice_Plugin
                 'created_by' => $created_by,
             ]);
             return;
+        }
+
+        // Áp dụng danh sách loại trừ trực tiếp từ frontend (belt-and-suspenders)
+        $excluded_item_ids = isset($sale_data['excluded_item_ids']) && is_array($sale_data['excluded_item_ids'])
+            ? $sale_data['excluded_item_ids']
+            : [];
+        if (!empty($excluded_item_ids)) {
+            $excluded_ids_map = array_fill_keys(array_map('intval', array_filter($excluded_item_ids)), true);
+            if (!empty($excluded_ids_map)) {
+                foreach ($source_result['payload']['items'] as &$src_item) {
+                    if (isset($excluded_ids_map[intval($src_item['ledger_item_id'] ?? 0)])) {
+                        $src_item['is_under24_promo_danger'] = true;
+                    }
+                }
+                unset($src_item);
+            }
         }
 
         $source_payload = $source_result['payload'];

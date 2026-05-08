@@ -458,7 +458,7 @@ class TGS_Viettel_Invoice_Flow_Service
         return array_values(array_unique(array_map('strval', $rows)));
     }
 
-    private function local_ledger_item_column_exists($column_name)
+    public function local_ledger_item_column_exists($column_name)
     {
         global $wpdb;
 

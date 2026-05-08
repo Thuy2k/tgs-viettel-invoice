@@ -64,6 +64,10 @@ class TGS_Viettel_Invoice_Plugin
         add_action('wp_ajax_nopriv_tgs_viettel_pos_preview_invoice_pdf', [$this, 'ajax_pos_preview_invoice_pdf']);
         add_action('wp_ajax_tgs_viettel_get_sale_debug_log', [$this, 'ajax_get_sale_debug_log']);
         add_action('wp_ajax_tgs_viettel_pos_list_statuses', [$this, 'ajax_pos_list_statuses']);
+        add_action('wp_ajax_tgs_viettel_pos_get_items_for_review', [$this, 'ajax_pos_get_items_for_review']);
+        add_action('wp_ajax_nopriv_tgs_viettel_pos_get_items_for_review', [$this, 'ajax_pos_get_items_for_review']);
+        add_action('wp_ajax_tgs_viettel_pos_update_danger_flags', [$this, 'ajax_pos_update_danger_flags']);
+        add_action('wp_ajax_nopriv_tgs_viettel_pos_update_danger_flags', [$this, 'ajax_pos_update_danger_flags']);
 
         // Nút "Gửi CQT" trên popup in hóa đơn POS (ưu tiên 20 để xuất sau nút Xuất HĐDT)
         add_action('tgs_pos_receipt_footer_buttons', [$this, 'render_cqt_receipt_button'], 20);
@@ -726,6 +730,229 @@ class TGS_Viettel_Invoice_Plugin
             'age_counts'    => $age_counts,
             'status_counts' => $status_counts,
         ]);
+    }
+
+    /**
+     * POS: Lấy danh sách item của đơn bán để review trước khi gửi CQT.
+     * Trả về gift_items, has_under24_main, under24_main_skus.
+     */
+    public function ajax_pos_get_items_for_review()
+    {
+        global $wpdb;
+
+        $nonce = sanitize_text_field($_REQUEST['nonce'] ?? '');
+        if (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce')) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+            return;
+        }
+
+        $sale_ledger_id = intval($_REQUEST['sale_ledger_id'] ?? 0);
+        if ($sale_ledger_id <= 0) {
+            wp_send_json_error(['message' => 'Thiếu sale_ledger_id.']);
+            return;
+        }
+
+        if (!defined('TGS_TABLE_LOCAL_LEDGER') || !defined('TGS_TABLE_LOCAL_LEDGER_ITEM') || !defined('TGS_TABLE_LOCAL_PRODUCT_NAME')) {
+            wp_send_json_error(['message' => 'Thiếu hằng số bảng dữ liệu.']);
+            return;
+        }
+
+        // Lấy item_ids từ phiếu bán
+        $sale = $wpdb->get_row(
+            $wpdb->prepare('SELECT local_ledger_item_id FROM ' . TGS_TABLE_LOCAL_LEDGER . ' WHERE local_ledger_id = %d LIMIT 1', $sale_ledger_id),
+            ARRAY_A
+        );
+
+        if (empty($sale)) {
+            wp_send_json_error(['message' => 'Không tìm thấy đơn bán hàng.']);
+            return;
+        }
+
+        $item_ids = is_string($sale['local_ledger_item_id']) ? json_decode($sale['local_ledger_item_id'], true) : [];
+        $item_ids = is_array($item_ids) ? array_map('intval', array_filter($item_ids)) : [];
+
+        if (empty($item_ids)) {
+            wp_send_json_success([
+                'gift_items' => [],
+                'all_items'  => [],
+                'has_under24_main' => false,
+                'under24_main_skus' => [],
+            ]);
+            return;
+        }
+
+        // Kiểm tra column is_under24_promo_danger tồn tại không
+        $has_danger_col = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_is_under24_promo_danger');
+        $danger_col_sql = $has_danger_col ? ', i.local_ledger_item_is_under24_promo_danger' : '';
+
+        $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                'SELECT i.local_ledger_item_id, i.local_ledger_item_gift_type, i.quantity, i.price,
+                        i.local_ledger_item_meta' . $danger_col_sql . ',
+                        p.local_product_name, p.local_product_sku
+                 FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
+                 LEFT JOIN ' . TGS_TABLE_LOCAL_PRODUCT_NAME . ' p ON p.local_product_name_id = i.local_product_name_id
+                 WHERE i.local_ledger_item_id IN (' . $placeholders . ')
+                 ORDER BY i.local_ledger_item_id ASC',
+                ...$item_ids
+            ),
+            ARRAY_A
+        );
+
+        if (empty($rows)) {
+            wp_send_json_success([
+                'gift_items' => [],
+                'all_items'  => [],
+                'has_under24_main' => false,
+                'under24_main_skus' => [],
+            ]);
+            return;
+        }
+
+        // Tìm SKU dưới 24 tháng
+        $all_skus = [];
+        foreach ($rows as $row) {
+            $sku = trim((string) ($row['local_product_sku'] ?? ''));
+            if ($sku !== '') {
+                $all_skus[] = $sku;
+            }
+        }
+        $all_skus = array_values(array_unique($all_skus));
+
+        $under24_skus = [];
+        if (!empty($all_skus) && defined('TGS_TABLE_GLOBAL_MILK_UNDER24M')) {
+            $sku_placeholders = implode(',', array_fill(0, count($all_skus), '%s'));
+            $found_under24 = $wpdb->get_col(
+                $wpdb->prepare(
+                    'SELECT global_product_sku FROM ' . TGS_TABLE_GLOBAL_MILK_UNDER24M . ' WHERE global_product_sku IN (' . $sku_placeholders . ')',
+                    ...$all_skus
+                )
+            );
+            $under24_skus = is_array($found_under24) ? $found_under24 : [];
+        }
+        $under24_lookup = array_fill_keys($under24_skus, true);
+
+        // Phân loại item
+        $gift_items = [];
+        $all_items = [];
+        $under24_main_skus = [];
+        $has_under24_main = false;
+        $stat_z_sku_count = 0;
+        $stat_danger_flagged_count = 0;
+
+        foreach ($rows as $row) {
+            $is_gift = intval($row['local_ledger_item_gift_type'] ?? 0) === 1;
+            $sku = (string) ($row['local_product_sku'] ?? '');
+            $danger = $has_danger_col ? intval($row['local_ledger_item_is_under24_promo_danger'] ?? 0) : 0;
+
+            // Phát hiện SKU kết thúc bằng chữ Z (case-insensitive).
+            // Ghi chú: phần mềm nghiệp vụ bên ngoài đang đặt đuôi Z cho các KM đặc biệt,
+            // hệ thống fill sẵn "loại bỏ" để an toàn — nhân viên vẫn có thể bỏ tích nếu cần.
+            $is_sku_ends_z = $is_gift && $sku !== '' && strtoupper(substr(rtrim($sku), -1)) === 'Z';
+
+            $item = [
+                'item_id'                 => intval($row['local_ledger_item_id']),
+                'name'                    => (string) ($row['local_product_name'] ?? ''),
+                'sku'                     => $sku,
+                'quantity'                => floatval($row['quantity']),
+                'price'                   => floatval($row['price']),
+                'is_gift'                 => $is_gift,
+                'is_under24_promo_danger' => $danger,
+                'is_sku_ends_z'           => $is_sku_ends_z,
+            ];
+
+            $all_items[] = $item;
+
+            if (!$is_gift) {
+                if (isset($under24_lookup[$sku]) && $sku !== '') {
+                    $has_under24_main = true;
+                    $under24_main_skus[] = $sku;
+                }
+            } else {
+                $gift_items[] = $item;
+                if ($is_sku_ends_z) {
+                    $stat_z_sku_count++;
+                }
+                if ($danger) {
+                    $stat_danger_flagged_count++;
+                }
+            }
+        }
+
+        $under24_main_skus = array_values(array_unique($under24_main_skus));
+
+        wp_send_json_success([
+            'gift_items'               => $gift_items,
+            'all_items'                => $all_items,
+            'has_under24_main'         => $has_under24_main,
+            'under24_main_skus'        => $under24_main_skus,
+            'stat_z_sku_count'         => $stat_z_sku_count,
+            'stat_danger_flagged_count' => $stat_danger_flagged_count,
+        ]);
+    }
+
+    /**
+     * POS: Cập nhật cờ is_under24_promo_danger cho các item của đơn bán.
+     * Frontend gửi lên mảng item_flags = [{item_id, danger_flag}].
+     */
+    public function ajax_pos_update_danger_flags()
+    {
+        global $wpdb;
+
+        $nonce = sanitize_text_field($_REQUEST['nonce'] ?? '');
+        if (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce')) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+            return;
+        }
+
+        $sale_ledger_id = intval($_REQUEST['sale_ledger_id'] ?? 0);
+        if ($sale_ledger_id <= 0) {
+            wp_send_json_error(['message' => 'Thiếu sale_ledger_id.']);
+            return;
+        }
+
+        $flags_raw = sanitize_text_field($_REQUEST['item_flags'] ?? '');
+        $flags = json_decode($flags_raw, true);
+
+        if (!is_array($flags) || empty($flags)) {
+            wp_send_json_success(['message' => 'Không có cờ nào cần cập nhật.', 'updated' => 0]);
+            return;
+        }
+
+        if (!defined('TGS_TABLE_LOCAL_LEDGER_ITEM')) {
+            wp_send_json_error(['message' => 'Thiếu hằng số bảng dữ liệu.']);
+            return;
+        }
+
+        if (!$this->flow_service->local_ledger_item_column_exists('local_ledger_item_is_under24_promo_danger')) {
+            wp_send_json_error(['message' => 'Cột local_ledger_item_is_under24_promo_danger chưa tồn tại. Cần chạy migration DB.']);
+            return;
+        }
+
+        $updated = 0;
+        foreach ($flags as $flag_entry) {
+            $item_id = intval($flag_entry['item_id'] ?? 0);
+            $danger  = intval($flag_entry['danger_flag'] ?? 0) === 1 ? 1 : 0;
+
+            if ($item_id <= 0) {
+                continue;
+            }
+
+            $result = $wpdb->update(
+                TGS_TABLE_LOCAL_LEDGER_ITEM,
+                ['local_ledger_item_is_under24_promo_danger' => $danger],
+                ['local_ledger_item_id' => $item_id],
+                ['%d'],
+                ['%d']
+            );
+
+            if ($result !== false) {
+                $updated++;
+            }
+        }
+
+        wp_send_json_success(['message' => "Đã cập nhật $updated dòng.", 'updated' => $updated]);
     }
 
     /**
@@ -1921,23 +2148,23 @@ class TGS_Viettel_Invoice_Plugin
 
         /**
          * Render nút "Gửi lên cục thuế" vào popup in hóa đơn POS.
-         * Nút này dùng Alpine.js binding để gọi openViettelCQTModal().
+         * Nút này dùng Alpine.js binding để gọi openItemReviewModal() (bước review trước CQT).
          */
         public function render_cqt_receipt_button()
         {
             ?>
             <button type="button"
-                x-on:click="openViettelCQTModal()"
-                :disabled="isReceiptLoading || viettelCQT.isSending"
-                :class="isReceiptLoading || viettelCQT.isSending ? 'opacity-60 cursor-not-allowed' : ''"
+                x-on:click="openItemReviewModal()"
+                :disabled="isReceiptLoading || viettelCQT.isSending || viettelItemReview.isSaving"
+                :class="isReceiptLoading || viettelCQT.isSending || viettelItemReview.isSaving ? 'opacity-60 cursor-not-allowed' : ''"
                 class="flex-1 min-w-[120px] py-3 bg-green-600 rounded-xl text-sm font-medium text-white hover:bg-green-700">
-                <span x-show="!viettelCQT.isSending">Gửi lên cục thuế</span>
-                <span x-show="viettelCQT.isSending" class="flex items-center justify-center gap-1">
+                <span x-show="!viettelCQT.isSending && !viettelItemReview.isSaving">Gửi lên cục thuế</span>
+                <span x-show="viettelCQT.isSending || viettelItemReview.isSaving" class="flex items-center justify-center gap-1">
                     <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
                     </svg>
-                    Đang gửi...
+                    Đang xử lý...
                 </span>
             </button>
             <?php

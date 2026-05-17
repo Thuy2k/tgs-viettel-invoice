@@ -78,7 +78,8 @@ class TGS_Viettel_Invoice_Flow_Service
         $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
         $items = $wpdb->get_results(
             $wpdb->prepare(
-                'SELECT i.local_ledger_item_id, i.local_product_name_id, i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price' . $optional_select_sql . ',
+                'SELECT i.local_ledger_item_id, i.local_product_name_id, i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price,
+                        i.local_ledger_item_discount, i.local_ledger_item_discount_type' . $optional_select_sql . ',
                         p.local_product_name, p.local_product_sku, p.local_product_unit
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  LEFT JOIN ' . TGS_TABLE_LOCAL_PRODUCT_NAME . ' p ON p.local_product_name_id = i.local_product_name_id
@@ -89,27 +90,71 @@ class TGS_Viettel_Invoice_Flow_Service
             ARRAY_A
         );
 
+        /**
+         * Cơ quan thuế (Viettel/CQT) chỉ quan tâm đến ĐƠN GIÁ SAU KHUYẾN MÃI của từng sản phẩm.
+         * Họ không quan tâm đến cấu trúc khuyến mãi (% hay tiền), cũng không quan tâm nội bộ
+         * shop áp dụng CTKM như thế nào. Chỉ cần biết: "bán 1 cái giá bao nhiêu".
+         *
+         * Công thức truyền lên API thuế:
+         *   unitPrice                    = đơn giá sau KM (1 đơn vị)
+         *   itemTotalAmountAfterDiscount = unitPrice × quantity
+         *
+         * Cách lấy đơn giá sau KM (theo thứ tự ưu tiên):
+         *   [1] Cột local_ledger_item_price_after_discount — nếu đã được ghi rõ khi tạo phiếu (> 0)
+         *   [2] Tính ngược từ: price (giá gốc chưa KM) + discount_type + discount_value
+         *       - percent : price × (1 - discount% / 100)   → discount=100% thì = 0 (hàng tặng)
+         *       - vnd     : price − discount_vnd             → không âm
+         *       - không KM: giữ nguyên price
+         *
+         * Lưu ý: đơn giá truyền lên là giá CHƯA bao gồm VAT (price đã được tách VAT khi tạo phiếu).
+         * VAT được tính và truyền riêng ở bước build_issue_payload_from_filtered().
+         */
         $source_items = [];
         foreach ($items as $item) {
             $quantity = floatval($item['quantity']);
-            $unit_price = isset($item['local_ledger_item_price_after_discount'])
+
+            // Ưu tiên 1: cột local_ledger_item_price_after_discount nếu đã được lưu (khác NULL/0)
+            $explicit_price_after_discount = $has_price_after_discount
+                && isset($item['local_ledger_item_price_after_discount'])
                 && $item['local_ledger_item_price_after_discount'] !== null
                 && $item['local_ledger_item_price_after_discount'] !== ''
-                ? floatval($item['local_ledger_item_price_after_discount'])
-                : floatval($item['price']);
+                && floatval($item['local_ledger_item_price_after_discount']) > 0;
+
+            if ($explicit_price_after_discount) {
+                // Đã lưu sẵn — dùng thẳng, không cần tính lại
+                $unit_price = floatval($item['local_ledger_item_price_after_discount']);
+            } else {
+                // Ưu tiên 2: tính từ price (giá gốc chưa KM) + cột discount
+                // local_ledger_item_discount      = giá trị gốc user nhập (vd: 8 cho 8%, 20000 cho 20k VNĐ)
+                // local_ledger_item_discount_type = 'percent' | 'vnd'
+                $raw_price  = floatval($item['price']);
+                $disc_type  = $item['local_ledger_item_discount_type'] ?? 'percent';
+                $disc_value = floatval($item['local_ledger_item_discount'] ?? 0);
+
+                if ($disc_value <= 0) {
+                    // Không có khuyến mãi — đơn giá giữ nguyên
+                    $unit_price = $raw_price;
+                } elseif ($disc_type === 'percent') {
+                    // Giảm theo %: price × (1 - disc%) — discount=100% → đơn giá = 0 (hàng tặng)
+                    $unit_price = max(0.0, $raw_price * (1 - $disc_value / 100));
+                } else {
+                    // Giảm theo số tiền VNĐ tính trên 1 đơn vị sản phẩm
+                    $unit_price = max(0.0, $raw_price - $disc_value);
+                }
+            }
 
             $source_items[] = [
-                'ledger_item_id' => intval($item['local_ledger_item_id']),
-                'product_id' => intval($item['local_product_name_id']),
-                'is_gift' => intval($item['local_ledger_item_gift_type'] ?? 0) === 1,
-                'is_under24_promo_danger' => intval($item['local_ledger_item_is_under24_promo_danger'] ?? 0) === 1,
-                'gift_parent_sku' => $this->extract_gift_parent_sku($item['local_ledger_item_meta'] ?? ''),
-                'sku' => (string) ($item['local_product_sku'] ?? ''),
-                'item_name' => (string) ($item['local_product_name'] ?? ''),
-                'unit_name' => (string) ($item['local_product_unit'] ?? ''),
-                'quantity' => $quantity,
-                'unit_price_after_discount' => $unit_price,
-                'line_total' => $quantity * $unit_price,
+                'ledger_item_id'           => intval($item['local_ledger_item_id']),
+                'product_id'               => intval($item['local_product_name_id']),
+                'is_gift'                  => intval($item['local_ledger_item_gift_type'] ?? 0) === 1,
+                'is_under24_promo_danger'  => intval($item['local_ledger_item_is_under24_promo_danger'] ?? 0) === 1,
+                'gift_parent_sku'          => $this->extract_gift_parent_sku($item['local_ledger_item_meta'] ?? ''),
+                'sku'                      => (string) ($item['local_product_sku'] ?? ''),
+                'item_name'                => (string) ($item['local_product_name'] ?? ''),
+                'unit_name'                => (string) ($item['local_product_unit'] ?? ''),
+                'quantity'                 => $quantity,
+                'unit_price_after_discount' => $unit_price,   // Đơn giá sau KM → truyền vào unitPrice
+                'line_total'               => $quantity * $unit_price, // = itemTotalAmountAfterDiscount
             ];
         }
 

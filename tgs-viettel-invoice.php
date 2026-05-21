@@ -757,9 +757,9 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        // Lấy item_ids từ phiếu bán
+        // Lấy item_ids + thông tin phiếu bán (bao gồm code + ngày + person_id cho preview)
         $sale = $wpdb->get_row(
-            $wpdb->prepare('SELECT local_ledger_item_id FROM ' . TGS_TABLE_LOCAL_LEDGER . ' WHERE local_ledger_id = %d LIMIT 1', $sale_ledger_id),
+            $wpdb->prepare('SELECT local_ledger_item_id, local_ledger_code, local_ledger_person_id, created_at FROM ' . TGS_TABLE_LOCAL_LEDGER . ' WHERE local_ledger_id = %d LIMIT 1', $sale_ledger_id),
             ARRAY_A
         );
 
@@ -773,24 +773,49 @@ class TGS_Viettel_Invoice_Plugin
 
         if (empty($item_ids)) {
             wp_send_json_success([
-                'gift_items' => [],
-                'all_items'  => [],
-                'has_under24_main' => false,
+                'gift_items'    => [],
+                'main_items'    => [],
+                'all_items'     => [],
+                'has_under24_main'  => false,
                 'under24_main_skus' => [],
+                'sale_code'     => (string) ($sale['local_ledger_code'] ?? ''),
+                'sale_date'     => (string) ($sale['created_at'] ?? ''),
+                'customer'      => ['name' => 'Khách lẻ', 'phone' => '', 'address' => '', 'tax_code' => '', 'company_name' => ''],
             ]);
             return;
+        }
+
+        // --- Thông tin khách hàng cho preview hóa đơn (không lưu backend) ---
+        $preview_customer = ['name' => 'Khách lẻ', 'phone' => '', 'address' => '', 'tax_code' => '', 'company_name' => ''];
+        if (defined('TGS_TABLE_LOCAL_LEDGER_PERSON') && !empty($sale['local_ledger_person_id'])) {
+            $person_row = $wpdb->get_row(
+                $wpdb->prepare(
+                    'SELECT local_ledger_person_name, local_ledger_person_address, local_ledger_person_phone FROM ' . TGS_TABLE_LOCAL_LEDGER_PERSON . ' WHERE local_ledger_person_id = %d LIMIT 1',
+                    intval($sale['local_ledger_person_id'])
+                ),
+                ARRAY_A
+            );
+            if (!empty($person_row)) {
+                $preview_customer['name']    = (string) ($person_row['local_ledger_person_name'] ?? 'Khách lẻ');
+                $preview_customer['phone']   = (string) ($person_row['local_ledger_person_phone'] ?? '');
+                $preview_customer['address'] = (string) ($person_row['local_ledger_person_address'] ?? '');
+            }
         }
 
         // Kiểm tra column is_under24_promo_danger tồn tại không
         $has_danger_col = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_is_under24_promo_danger');
         $danger_col_sql = $has_danger_col ? ', i.local_ledger_item_is_under24_promo_danger' : '';
+        // Kiểm tra column price_after_discount cho preview
+        $has_pad_col = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_price_after_discount');
+        $pad_col_sql = $has_pad_col ? ', i.local_ledger_item_price_after_discount' : '';
 
         $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
         $rows = $wpdb->get_results(
             $wpdb->prepare(
                 'SELECT i.local_ledger_item_id, i.local_ledger_item_gift_type, i.quantity, i.price,
-                        i.local_ledger_item_meta' . $danger_col_sql . ',
-                        p.local_product_name, p.local_product_sku
+                        i.local_ledger_item_meta, i.local_ledger_item_discount, i.local_ledger_item_discount_type'
+                        . $danger_col_sql . $pad_col_sql . ',
+                        p.local_product_name, p.local_product_sku, p.local_product_unit
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  LEFT JOIN ' . TGS_TABLE_LOCAL_PRODUCT_NAME . ' p ON p.local_product_name_id = i.local_product_name_id
                  WHERE i.local_ledger_item_id IN (' . $placeholders . ')
@@ -852,15 +877,39 @@ class TGS_Viettel_Invoice_Plugin
             // Phần mềm nghiệp vụ bên ngoài quy ước đuôi Z = loại bỏ khi gửi thuế.
             $is_sku_ends_z = $sku !== '' && strtoupper(substr(rtrim($sku), -1)) === 'Z';
 
+            // Tính đơn giá sau KM cho preview (mirrors build_smart_payload_from_sale)
+            $disc_value   = floatval($row['local_ledger_item_discount'] ?? 0);
+            $disc_type    = (string) ($row['local_ledger_item_discount_type'] ?? 'percent');
+            $stored_pad   = $has_pad_col ? floatval($row['local_ledger_item_price_after_discount'] ?? 0) : 0.0;
+            if ($stored_pad > 0) {
+                $price_after_disc = $stored_pad;
+            } elseif ($is_gift) {
+                $price_after_disc = 0.0; // Hàng tặng → đơn giá 0 khi gửi thuế
+            } else {
+                $raw_price = floatval($row['price']);
+                if ($disc_value <= 0) {
+                    $price_after_disc = $raw_price;
+                } elseif ($disc_type === 'percent') {
+                    $price_after_disc = max(0.0, $raw_price * (1 - $disc_value / 100));
+                } else {
+                    $price_after_disc = max(0.0, $raw_price - $disc_value);
+                }
+            }
+
             $item = [
                 'item_id'                 => intval($row['local_ledger_item_id']),
                 'name'                    => (string) ($row['local_product_name'] ?? ''),
                 'sku'                     => $sku,
+                'unit_name'               => (string) ($row['local_product_unit'] ?? ''),
                 'quantity'                => floatval($row['quantity']),
                 'price'                   => floatval($row['price']),
+                'discount_value'          => $disc_value,
+                'discount_type'           => $disc_type,
+                'price_after_discount'    => $price_after_disc,
                 'is_gift'                 => $is_gift,
                 'is_under24_promo_danger' => $danger,
                 'is_sku_ends_z'           => $is_sku_ends_z,
+                'is_under24_main'         => !$is_gift && isset($under24_lookup[$sku]) && $sku !== '',
             ];
 
             $all_items[] = $item;
@@ -896,6 +945,10 @@ class TGS_Viettel_Invoice_Plugin
             'stat_z_sku_count'         => $stat_z_sku_count,
             'stat_danger_flagged_count' => $stat_danger_flagged_count,
             'stat_z_main_count'        => $stat_z_main_count,
+            // Dữ liệu bổ sung cho preview hóa đơn real-time (không lưu backend)
+            'sale_code'                => (string) ($sale['local_ledger_code'] ?? ''),
+            'sale_date'                => (string) ($sale['created_at'] ?? ''),
+            'customer'                 => $preview_customer,
         ]);
     }
 

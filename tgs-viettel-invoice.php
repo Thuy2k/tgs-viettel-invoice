@@ -90,7 +90,8 @@ class TGS_Viettel_Invoice_Plugin
         $items = [
             'viettel-invoice-create' => ['bx bx-receipt text-primary me-1', 'Viettel Invoice'],
             'viettel-invoice-settings' => ['bx bx-cog text-warning me-1', 'Cấu hình Viettel Invoice'],
-            'viettel-invoice-guide' => ['bx bx-book-content text-info me-1', 'Hướng dẫn luồng'],
+            // [ẨN MENU - 2026-06-02] Hướng dẫn luồng - không dùng nữa
+            // 'viettel-invoice-guide' => ['bx bx-book-content text-info me-1', 'Hướng dẫn luồng'],
         ];
 
         foreach ($items as $view => $meta) {

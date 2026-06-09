@@ -790,7 +790,7 @@ class TGS_Viettel_Invoice_Plugin
         $rows = $wpdb->get_results(
             $wpdb->prepare(
                 'SELECT i.local_ledger_item_id, i.local_ledger_item_gift_type, i.quantity, i.price,
-                        i.local_ledger_item_meta' . $danger_col_sql . ',
+                        i.local_ledger_item_meta, i.local_ledger_item_tax_percent' . $danger_col_sql . ',
                         p.local_product_name, p.local_product_sku
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  LEFT JOIN ' . TGS_TABLE_LOCAL_PRODUCT_NAME . ' p ON p.local_product_name_id = i.local_product_name_id
@@ -864,6 +864,9 @@ class TGS_Viettel_Invoice_Plugin
                 'is_gift'                 => $is_gift,
                 'is_under24_promo_danger' => $danger,
                 'is_sku_ends_z'           => $is_sku_ends_z,
+                'tax_percent'             => isset($row['local_ledger_item_tax_percent']) && $row['local_ledger_item_tax_percent'] !== null && $row['local_ledger_item_tax_percent'] !== ''
+                    ? floatval($row['local_ledger_item_tax_percent'])
+                    : 8.0,
             ];
 
             $all_items[] = $item;

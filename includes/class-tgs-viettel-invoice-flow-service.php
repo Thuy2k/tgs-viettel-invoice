@@ -18,7 +18,7 @@ class TGS_Viettel_Invoice_Flow_Service
             ];
         }
 
-        if (!defined('TGS_TABLE_LOCAL_LEDGER') || !defined('TGS_TABLE_LOCAL_LEDGER_ITEM') || !defined('TGS_TABLE_LOCAL_PRODUCT_NAME')) {
+        if (!defined('TGS_TABLE_LOCAL_LEDGER') || !defined('TGS_TABLE_LOCAL_LEDGER_ITEM')) {
             return [
                 'success' => false,
                 'message' => 'Thiếu hằng số bảng dữ liệu từ tgs_shop_management.',
@@ -65,6 +65,9 @@ class TGS_Viettel_Invoice_Flow_Service
 
         $has_price_after_discount = $this->local_ledger_item_column_exists('local_ledger_item_price_after_discount');
         $has_under24_promo_danger = $this->local_ledger_item_column_exists('local_ledger_item_is_under24_promo_danger');
+        $has_global_product_name_id = $this->local_ledger_item_column_exists('global_product_name_id');
+        $has_local_product_sku = $this->local_ledger_item_column_exists('local_product_sku');
+        $has_tax_percent = $this->local_ledger_item_column_exists('local_ledger_item_tax_percent');
 
         $optional_selects = [];
         if ($has_price_after_discount) {
@@ -73,21 +76,29 @@ class TGS_Viettel_Invoice_Flow_Service
         if ($has_under24_promo_danger) {
             $optional_selects[] = 'i.local_ledger_item_is_under24_promo_danger';
         }
+        $optional_selects[] = $has_global_product_name_id ? 'i.global_product_name_id' : '0 AS global_product_name_id';
+        $optional_selects[] = $has_local_product_sku ? 'i.local_product_sku' : "'' AS local_product_sku";
+        $optional_selects[] = $has_tax_percent ? 'i.local_ledger_item_tax_percent' : '8.0 AS local_ledger_item_tax_percent';
         $optional_select_sql = empty($optional_selects) ? '' : ', ' . implode(', ', $optional_selects);
 
         $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
         $items = $wpdb->get_results(
             $wpdb->prepare(
-                'SELECT i.local_ledger_item_id, i.local_product_name_id, i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price, i.local_ledger_item_tax_percent' . $optional_select_sql . ',
-                        p.local_product_name, p.local_product_sku, p.local_product_unit
+                'SELECT i.local_ledger_item_id, i.local_product_name_id,
+                        i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price,
+                        i.local_ledger_item_discount, i.local_ledger_item_discount_type' . $optional_select_sql . '
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
-                 LEFT JOIN ' . TGS_TABLE_LOCAL_PRODUCT_NAME . ' p ON p.local_product_name_id = i.local_product_name_id
                  WHERE i.local_ledger_item_id IN (' . $placeholders . ')
                  ORDER BY i.local_ledger_item_id ASC',
                 ...$item_ids
             ),
             ARRAY_A
         );
+
+        // Catalog sản phẩm lấy từ global. local_product_* ở đây chỉ là alias tương thích payload cũ.
+        if (class_exists('TGS_Viettel_Invoice_Global_Products')) {
+            $items = TGS_Viettel_Invoice_Global_Products::enrich_ledger_items($items, get_current_blog_id());
+        }
 
         /**
          * Cơ quan thuế (Viettel/CQT) chỉ quan tâm đến ĐƠN GIÁ SAU KHUYẾN MÃI của từng sản phẩm.
@@ -491,27 +502,16 @@ class TGS_Viettel_Invoice_Flow_Service
 
     private function find_under24_skus(array $skus)
     {
-        global $wpdb;
-
         $skus = array_values(array_filter(array_map('trim', $skus)));
-        if (empty($skus) || !defined('TGS_TABLE_GLOBAL_MILK_UNDER24M')) {
+        if (empty($skus)) {
             return [];
         }
 
-        $placeholders = implode(', ', array_fill(0, count($skus), '%s'));
-        $sql = 'SELECT global_product_sku
-                FROM ' . TGS_TABLE_GLOBAL_MILK_UNDER24M . '
-                WHERE global_product_sku IN (' . $placeholders . ')
-                  AND (is_deleted = 0 OR is_deleted IS NULL)';
-
-        $prepared = $wpdb->prepare($sql, $skus);
-        $rows = $wpdb->get_col($prepared);
-
-        if (empty($rows)) {
-            return [];
+        if (class_exists('TGS_Viettel_Invoice_Global_Products')) {
+            return TGS_Viettel_Invoice_Global_Products::find_under24_skus($skus);
         }
 
-        return array_values(array_unique(array_map('strval', $rows)));
+        return [];
     }
 
     public function local_ledger_item_column_exists($column_name)

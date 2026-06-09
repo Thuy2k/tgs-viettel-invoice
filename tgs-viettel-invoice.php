@@ -17,6 +17,11 @@ define('TGS_VIETTEL_INVOICE_VERSION', '1.0.0');
 define('TGS_VIETTEL_INVOICE_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TGS_VIETTEL_INVOICE_PLUGIN_URL', plugin_dir_url(__FILE__));
 
+$tgs_viettel_global_products_file = TGS_VIETTEL_INVOICE_PLUGIN_DIR . 'includes/class-tgs-viettel-invoice-global-products.php';
+if (file_exists($tgs_viettel_global_products_file)) {
+    require_once $tgs_viettel_global_products_file;
+}
+
 $tgs_viettel_flow_service_file = TGS_VIETTEL_INVOICE_PLUGIN_DIR . 'includes/class-tgs-viettel-invoice-flow-service.php';
 if (file_exists($tgs_viettel_flow_service_file)) {
     require_once $tgs_viettel_flow_service_file;
@@ -753,7 +758,7 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        if (!defined('TGS_TABLE_LOCAL_LEDGER') || !defined('TGS_TABLE_LOCAL_LEDGER_ITEM') || !defined('TGS_TABLE_LOCAL_PRODUCT_NAME')) {
+        if (!defined('TGS_TABLE_LOCAL_LEDGER') || !defined('TGS_TABLE_LOCAL_LEDGER_ITEM')) {
             wp_send_json_error(['message' => 'Thiếu hằng số bảng dữ liệu.']);
             return;
         }
@@ -811,6 +816,10 @@ class TGS_Viettel_Invoice_Plugin
         // Kiểm tra column price_after_discount cho preview
         $has_pad_col = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_price_after_discount');
         $pad_col_sql = $has_pad_col ? ', i.local_ledger_item_price_after_discount' : '';
+        $has_global_product_name_id = $this->flow_service->local_ledger_item_column_exists('global_product_name_id');
+        $has_local_product_sku = $this->flow_service->local_ledger_item_column_exists('local_product_sku');
+        $global_id_sql = $has_global_product_name_id ? ', i.global_product_name_id' : ', 0 AS global_product_name_id';
+        $sku_sql = $has_local_product_sku ? ', i.local_product_sku' : ", '' AS local_product_sku";
 
         $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
         $rows = $wpdb->get_results(
@@ -820,13 +829,17 @@ class TGS_Viettel_Invoice_Plugin
                         . $danger_col_sql . $pad_col_sql . ',
                         p.local_product_name, p.local_product_sku, p.local_product_unit
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
-                 LEFT JOIN ' . TGS_TABLE_LOCAL_PRODUCT_NAME . ' p ON p.local_product_name_id = i.local_product_name_id
                  WHERE i.local_ledger_item_id IN (' . $placeholders . ')
                  ORDER BY i.local_ledger_item_id ASC',
                 ...$item_ids
             ),
             ARRAY_A
         );
+
+        // Catalog sản phẩm lấy từ global. local_product_* chỉ còn là alias để UI POS cũ đọc được.
+        if (class_exists('TGS_Viettel_Invoice_Global_Products')) {
+            $rows = TGS_Viettel_Invoice_Global_Products::enrich_ledger_items($rows, get_current_blog_id());
+        }
 
         if (empty($rows)) {
             wp_send_json_success([
@@ -849,17 +862,9 @@ class TGS_Viettel_Invoice_Plugin
         }
         $all_skus = array_values(array_unique($all_skus));
 
-        $under24_skus = [];
-        if (!empty($all_skus) && defined('TGS_TABLE_GLOBAL_MILK_UNDER24M')) {
-            $sku_placeholders = implode(',', array_fill(0, count($all_skus), '%s'));
-            $found_under24 = $wpdb->get_col(
-                $wpdb->prepare(
-                    'SELECT global_product_sku FROM ' . TGS_TABLE_GLOBAL_MILK_UNDER24M . ' WHERE global_product_sku IN (' . $sku_placeholders . ')',
-                    ...$all_skus
-                )
-            );
-            $under24_skus = is_array($found_under24) ? $found_under24 : [];
-        }
+        $under24_skus = class_exists('TGS_Viettel_Invoice_Global_Products')
+            ? TGS_Viettel_Invoice_Global_Products::find_under24_skus($all_skus)
+            : [];
         $under24_lookup = array_fill_keys($under24_skus, true);
 
         // Phân loại item
@@ -2002,8 +2007,6 @@ class TGS_Viettel_Invoice_Plugin
             !is_array($rows)
             || empty($rows)
             || !defined('TGS_TABLE_LOCAL_LEDGER_ITEM')
-            || !defined('TGS_TABLE_LOCAL_PRODUCT_NAME')
-            || !defined('TGS_TABLE_GLOBAL_MILK_UNDER24M')
         ) {
             return [];
         }
@@ -2031,17 +2034,27 @@ class TGS_Viettel_Invoice_Plugin
             return [];
         }
 
+        $has_global_product_name_id = $this->flow_service->local_ledger_item_column_exists('global_product_name_id');
+        $has_local_product_sku = $this->flow_service->local_ledger_item_column_exists('local_product_sku');
+        $global_id_sql = $has_global_product_name_id ? ', i.global_product_name_id' : ', 0 AS global_product_name_id';
+        $sku_sql = $has_local_product_sku ? ', i.local_product_sku' : ", '' AS local_product_sku";
+
         $placeholders = implode(',', array_fill(0, count($all_item_ids), '%d'));
         $items = $wpdb->get_results(
             $wpdb->prepare(
-                'SELECT i.local_ledger_item_id, i.local_ledger_item_gift_type, p.local_product_sku
+                'SELECT i.local_ledger_item_id, i.local_product_name_id, i.local_ledger_item_gift_type'
+                    . $global_id_sql . $sku_sql . '
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
-                 LEFT JOIN ' . TGS_TABLE_LOCAL_PRODUCT_NAME . ' p ON p.local_product_name_id = i.local_product_name_id
                  WHERE i.local_ledger_item_id IN (' . $placeholders . ')',
                 ...$all_item_ids
             ),
             ARRAY_A
         );
+
+        // ID trên ledger là ID global, SKU/name resolve qua global product source.
+        if (class_exists('TGS_Viettel_Invoice_Global_Products')) {
+            $items = TGS_Viettel_Invoice_Global_Products::enrich_ledger_items($items, get_current_blog_id());
+        }
 
         if (empty($items)) {
             return [];
@@ -2067,17 +2080,10 @@ class TGS_Viettel_Invoice_Plugin
             return [];
         }
 
-        $sku_placeholders = implode(',', array_fill(0, count($main_skus), '%s'));
-        $under24_rows = $wpdb->get_col(
-            $wpdb->prepare(
-                'SELECT global_product_sku
-                 FROM ' . TGS_TABLE_GLOBAL_MILK_UNDER24M . '
-                 WHERE global_product_sku IN (' . $sku_placeholders . ')
-                   AND (is_deleted = 0 OR is_deleted IS NULL)',
-                ...$main_skus
-            )
-        );
-        $under24_sku_map = array_fill_keys(array_map('strval', $under24_rows ?: []), true);
+        $under24_rows = class_exists('TGS_Viettel_Invoice_Global_Products')
+            ? TGS_Viettel_Invoice_Global_Products::find_under24_skus($main_skus)
+            : [];
+        $under24_sku_map = array_fill_keys(array_map('strval', $under24_rows), true);
 
         $sale_flags = [];
         foreach ($sale_item_map as $sale_ledger_id => $item_ids) {

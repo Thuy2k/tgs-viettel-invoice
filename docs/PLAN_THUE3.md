@@ -74,7 +74,7 @@ Triển khai theo 3 hàm rõ trách nhiệm để dễ bảo trì.
 Luật nghiệp vụ:
 - Xác định hàng chính bằng `local_ledger_item_gift_type = 0` hoặc `NULL`.
 - Kiểm tra SKU sữa dưới 24 tháng bằng cách:
-  - Lấy SKU sản phẩm local (`local_product_sku`).
+  - Lấy SKU đã resolve từ global product source (`global_product_sku`, alias payload cũ là `local_product_sku`).
   - Đối chiếu với `wp_global_milk_under24m.global_product_sku`.
   - Chỉ lấy bản ghi `is_deleted = 0` hoặc `NULL`.
 - Nếu hàng chính là sữa dưới 24 tháng:

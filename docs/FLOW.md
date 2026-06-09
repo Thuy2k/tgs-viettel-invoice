@@ -55,3 +55,10 @@
   - totalTaxAmount
   - totalAmountWithTax
 - Neu can sua hoa don, thao tac tren web Viettel theo quy trinh ke toan.
+
+## 8) San pham global
+- Catalog san pham cua plugin nay doc theo chuan global, xem them:
+  - docs/global-product-flow.md
+  - ../tgs_shop_management/docs/global-product-api.md
+- Khong query/join bang local_product_name de lay ten, SKU, don vi san pham.
+- Cac key local_product_* trong payload chi la alias tu global de giu tuong thich UI/POS cu.

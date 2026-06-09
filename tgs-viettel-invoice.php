@@ -90,7 +90,8 @@ class TGS_Viettel_Invoice_Plugin
         $items = [
             'viettel-invoice-create' => ['bx bx-receipt text-primary me-1', 'Viettel Invoice'],
             'viettel-invoice-settings' => ['bx bx-cog text-warning me-1', 'Cấu hình Viettel Invoice'],
-            'viettel-invoice-guide' => ['bx bx-book-content text-info me-1', 'Hướng dẫn luồng'],
+            // [ẨN MENU - 2026-06-02] Hướng dẫn luồng - không dùng nữa
+            // 'viettel-invoice-guide' => ['bx bx-book-content text-info me-1', 'Hướng dẫn luồng'],
         ];
 
         foreach ($items as $view => $meta) {
@@ -757,9 +758,9 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        // Lấy item_ids từ phiếu bán
+        // Lấy item_ids + thông tin phiếu bán (bao gồm code + ngày + person_id cho preview)
         $sale = $wpdb->get_row(
-            $wpdb->prepare('SELECT local_ledger_item_id FROM ' . TGS_TABLE_LOCAL_LEDGER . ' WHERE local_ledger_id = %d LIMIT 1', $sale_ledger_id),
+            $wpdb->prepare('SELECT local_ledger_item_id, local_ledger_code, local_ledger_person_id, created_at FROM ' . TGS_TABLE_LOCAL_LEDGER . ' WHERE local_ledger_id = %d LIMIT 1', $sale_ledger_id),
             ARRAY_A
         );
 
@@ -778,20 +779,44 @@ class TGS_Viettel_Invoice_Plugin
                 'all_items'  => [],
                 'has_under24_main' => false,
                 'under24_main_skus' => [],
+                'sale_code'     => (string) ($sale['local_ledger_code'] ?? ''),
+                'sale_date'     => (string) ($sale['created_at'] ?? ''),
+                'customer'      => ['name' => 'Khách lẻ', 'phone' => '', 'address' => '', 'tax_code' => '', 'company_name' => ''],
             ]);
             return;
+        }
+
+        // --- Thông tin khách hàng cho preview hóa đơn (không lưu backend) ---
+        $preview_customer = ['name' => 'Khách lẻ', 'phone' => '', 'address' => '', 'tax_code' => '', 'company_name' => ''];
+        if (defined('TGS_TABLE_LOCAL_LEDGER_PERSON') && !empty($sale['local_ledger_person_id'])) {
+            $person_row = $wpdb->get_row(
+                $wpdb->prepare(
+                    'SELECT local_ledger_person_name, local_ledger_person_address, local_ledger_person_phone FROM ' . TGS_TABLE_LOCAL_LEDGER_PERSON . ' WHERE local_ledger_person_id = %d LIMIT 1',
+                    intval($sale['local_ledger_person_id'])
+                ),
+                ARRAY_A
+            );
+            if (!empty($person_row)) {
+                $preview_customer['name']    = (string) ($person_row['local_ledger_person_name'] ?? 'Khách lẻ');
+                $preview_customer['phone']   = (string) ($person_row['local_ledger_person_phone'] ?? '');
+                $preview_customer['address'] = (string) ($person_row['local_ledger_person_address'] ?? '');
+            }
         }
 
         // Kiểm tra column is_under24_promo_danger tồn tại không
         $has_danger_col = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_is_under24_promo_danger');
         $danger_col_sql = $has_danger_col ? ', i.local_ledger_item_is_under24_promo_danger' : '';
+        // Kiểm tra column price_after_discount cho preview
+        $has_pad_col = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_price_after_discount');
+        $pad_col_sql = $has_pad_col ? ', i.local_ledger_item_price_after_discount' : '';
 
         $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
         $rows = $wpdb->get_results(
             $wpdb->prepare(
                 'SELECT i.local_ledger_item_id, i.local_ledger_item_gift_type, i.quantity, i.price,
-                        i.local_ledger_item_meta, i.local_ledger_item_tax_percent' . $danger_col_sql . ',
-                        p.local_product_name, p.local_product_sku
+                        i.local_ledger_item_meta, i.local_ledger_item_discount, i.local_ledger_item_discount_type'
+                        . $danger_col_sql . $pad_col_sql . ',
+                        p.local_product_name, p.local_product_sku, p.local_product_unit
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  LEFT JOIN ' . TGS_TABLE_LOCAL_PRODUCT_NAME . ' p ON p.local_product_name_id = i.local_product_name_id
                  WHERE i.local_ledger_item_id IN (' . $placeholders . ')
@@ -844,6 +869,8 @@ class TGS_Viettel_Invoice_Plugin
         $stat_z_sku_count = 0;
         $stat_z_main_count = 0;
         $stat_danger_flagged_count = 0;
+        $stat_z_main_count = 0;
+        $main_items = [];
 
         foreach ($rows as $row) {
             $is_gift = intval($row['local_ledger_item_gift_type'] ?? 0) === 1;
@@ -853,32 +880,32 @@ class TGS_Viettel_Invoice_Plugin
             // Phát hiện SKU kết thúc bằng chữ Z (case-insensitive).
             // Ghi chú: phần mềm nghiệp vụ bên ngoài đang đặt đuôi Z cho các KM đặc biệt,
             // hệ thống fill sẵn "loại bỏ" để an toàn — nhân viên vẫn có thể bỏ tích nếu cần.
-            $is_sku_ends_z = $sku !== '' && strtoupper(substr(rtrim($sku), -1)) === 'Z';
+            $is_sku_ends_z = $is_gift && $sku !== '' && strtoupper(substr(rtrim($sku), -1)) === 'Z';
 
             $item = [
                 'item_id'                 => intval($row['local_ledger_item_id']),
                 'name'                    => (string) ($row['local_product_name'] ?? ''),
                 'sku'                     => $sku,
+                'unit_name'               => (string) ($row['local_product_unit'] ?? ''),
                 'quantity'                => floatval($row['quantity']),
                 'price'                   => floatval($row['price']),
+                'discount_value'          => $disc_value,
+                'discount_type'           => $disc_type,
+                'price_after_discount'    => $price_after_disc,
                 'is_gift'                 => $is_gift,
                 'is_under24_promo_danger' => $danger,
                 'is_sku_ends_z'           => $is_sku_ends_z,
-                'tax_percent'             => isset($row['local_ledger_item_tax_percent']) && $row['local_ledger_item_tax_percent'] !== null && $row['local_ledger_item_tax_percent'] !== ''
-                    ? floatval($row['local_ledger_item_tax_percent'])
-                    : 8.0,
             ];
 
             $all_items[] = $item;
 
             if (!$is_gift) {
-                $main_items[] = $item;
-                if ($is_sku_ends_z) {
-                    $stat_z_main_count++;
-                }
                 if (isset($under24_lookup[$sku]) && $sku !== '') {
                     $has_under24_main = true;
                     $under24_main_skus[] = $sku;
+                }
+                if ($is_sku_ends_z) {
+                    $stat_z_main_count++;
                 }
             } else {
                 $gift_items[] = $item;
@@ -902,6 +929,11 @@ class TGS_Viettel_Invoice_Plugin
             'stat_z_sku_count'         => $stat_z_sku_count,
             'stat_z_main_count'        => $stat_z_main_count,
             'stat_danger_flagged_count' => $stat_danger_flagged_count,
+            'stat_z_main_count'        => $stat_z_main_count,
+            // Dữ liệu bổ sung cho preview hóa đơn real-time (không lưu backend)
+            'sale_code'                => (string) ($sale['local_ledger_code'] ?? ''),
+            'sale_date'                => (string) ($sale['created_at'] ?? ''),
+            'customer'                 => $preview_customer,
         ]);
     }
 
@@ -1142,6 +1174,7 @@ class TGS_Viettel_Invoice_Plugin
             'sale_ledger_id' => $sale_ledger_id,
             'sale_code' => sanitize_text_field($latest['local_ledger_code'] ?? ''),
             'employee_id' => $created_by,
+            'excluded_item_ids' => $this->parse_excluded_item_ids_from_post(),
         ], $settings);
 
         wp_send_json_success([
@@ -2229,6 +2262,23 @@ class TGS_Viettel_Invoice_Plugin
                 return;
             }
 
+            // Áp dụng danh sách loại trừ trực tiếp từ frontend (belt-and-suspenders, độc lập với DB)
+            $excluded_ids_raw = sanitize_text_field($_POST['excluded_item_ids'] ?? '');
+            if ($excluded_ids_raw !== '' && $excluded_ids_raw !== '[]') {
+                $excluded_ids = json_decode($excluded_ids_raw, true);
+                if (is_array($excluded_ids) && !empty($excluded_ids)) {
+                    $excluded_ids_map = array_fill_keys(array_map('intval', array_filter($excluded_ids)), true);
+                    if (!empty($excluded_ids_map)) {
+                        foreach ($source_result['payload']['items'] as &$src_item) {
+                            if (isset($excluded_ids_map[intval($src_item['ledger_item_id'] ?? 0)])) {
+                                $src_item['is_under24_promo_danger'] = true;
+                            }
+                        }
+                        unset($src_item);
+                    }
+                }
+            }
+
             // Bước 2: Lọc + sắp xếp items theo quy tắc thuế
             $filtered_result = $this->flow_service->filter_and_sort_items_for_tax($source_result['payload']);
             if (empty($filtered_result['success'])) {
@@ -2413,6 +2463,19 @@ class TGS_Viettel_Invoice_Plugin
         $this->run_auto_issue_cqt_flow($sale_data, $settings);
     }
 
+    private function parse_excluded_item_ids_from_post()
+    {
+        $raw = sanitize_text_field($_POST['excluded_item_ids'] ?? '');
+        if ($raw === '' || $raw === '[]') {
+            return [];
+        }
+        $ids = json_decode($raw, true);
+        if (!is_array($ids) || empty($ids)) {
+            return [];
+        }
+        return array_values(array_filter(array_map('intval', $ids)));
+    }
+
     private function run_auto_issue_cqt_flow($sale_data, $settings)
     {
         $sale_ledger_id = intval($sale_data['sale_ledger_id'] ?? 0);
@@ -2433,6 +2496,22 @@ class TGS_Viettel_Invoice_Plugin
                 'created_by' => $created_by,
             ]);
             return;
+        }
+
+        // Áp dụng danh sách loại trừ trực tiếp từ frontend (belt-and-suspenders)
+        $excluded_item_ids = isset($sale_data['excluded_item_ids']) && is_array($sale_data['excluded_item_ids'])
+            ? $sale_data['excluded_item_ids']
+            : [];
+        if (!empty($excluded_item_ids)) {
+            $excluded_ids_map = array_fill_keys(array_map('intval', array_filter($excluded_item_ids)), true);
+            if (!empty($excluded_ids_map)) {
+                foreach ($source_result['payload']['items'] as &$src_item) {
+                    if (isset($excluded_ids_map[intval($src_item['ledger_item_id'] ?? 0)])) {
+                        $src_item['is_under24_promo_danger'] = true;
+                    }
+                }
+                unset($src_item);
+            }
         }
 
         $source_payload = $source_result['payload'];

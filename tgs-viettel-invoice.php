@@ -880,6 +880,27 @@ class TGS_Viettel_Invoice_Plugin
             $is_gift = intval($row['local_ledger_item_gift_type'] ?? 0) === 1;
             $sku = (string) ($row['local_product_sku'] ?? '');
             $danger = $has_danger_col ? intval($row['local_ledger_item_is_under24_promo_danger'] ?? 0) : 0;
+            $disc_value = floatval($row['local_ledger_item_discount'] ?? 0);
+            $disc_type = (string) ($row['local_ledger_item_discount_type'] ?? 'percent');
+            $price_after_disc = null;
+
+            if (
+                $has_pad_col
+                && array_key_exists('local_ledger_item_price_after_discount', $row)
+                && $row['local_ledger_item_price_after_discount'] !== null
+                && $row['local_ledger_item_price_after_discount'] !== ''
+            ) {
+                $price_after_disc = floatval($row['local_ledger_item_price_after_discount']);
+            } else {
+                $raw_price = floatval($row['price'] ?? 0);
+                if ($disc_value <= 0) {
+                    $price_after_disc = $raw_price;
+                } elseif ($disc_type === 'percent') {
+                    $price_after_disc = max(0.0, $raw_price * (1 - $disc_value / 100));
+                } else {
+                    $price_after_disc = max(0.0, $raw_price - $disc_value);
+                }
+            }
 
             // Phát hiện SKU kết thúc bằng chữ Z (case-insensitive).
             // Ghi chú: phần mềm nghiệp vụ bên ngoài đang đặt đuôi Z cho các KM đặc biệt,

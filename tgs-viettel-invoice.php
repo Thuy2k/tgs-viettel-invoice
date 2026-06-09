@@ -139,8 +139,8 @@ class TGS_Viettel_Invoice_Plugin
             'username' => '',
             'password' => '',
             'access_token' => '',
-            'default_template_code' => '',
-            'default_invoice_series' => '',
+            'default_template_code' => '1/770',
+            'default_invoice_series' => 'K23TXM',
             'default_payment_method' => 'TM/CK',
             'verify_ssl' => 1,
             'auto_enabled' => 0,
@@ -774,6 +774,7 @@ class TGS_Viettel_Invoice_Plugin
         if (empty($item_ids)) {
             wp_send_json_success([
                 'gift_items' => [],
+                'main_items' => [],
                 'all_items'  => [],
                 'has_under24_main' => false,
                 'under24_main_skus' => [],
@@ -803,6 +804,7 @@ class TGS_Viettel_Invoice_Plugin
         if (empty($rows)) {
             wp_send_json_success([
                 'gift_items' => [],
+                'main_items' => [],
                 'all_items'  => [],
                 'has_under24_main' => false,
                 'under24_main_skus' => [],
@@ -835,10 +837,12 @@ class TGS_Viettel_Invoice_Plugin
 
         // Phân loại item
         $gift_items = [];
+        $main_items = [];
         $all_items = [];
         $under24_main_skus = [];
         $has_under24_main = false;
         $stat_z_sku_count = 0;
+        $stat_z_main_count = 0;
         $stat_danger_flagged_count = 0;
 
         foreach ($rows as $row) {
@@ -849,7 +853,7 @@ class TGS_Viettel_Invoice_Plugin
             // Phát hiện SKU kết thúc bằng chữ Z (case-insensitive).
             // Ghi chú: phần mềm nghiệp vụ bên ngoài đang đặt đuôi Z cho các KM đặc biệt,
             // hệ thống fill sẵn "loại bỏ" để an toàn — nhân viên vẫn có thể bỏ tích nếu cần.
-            $is_sku_ends_z = $is_gift && $sku !== '' && strtoupper(substr(rtrim($sku), -1)) === 'Z';
+            $is_sku_ends_z = $sku !== '' && strtoupper(substr(rtrim($sku), -1)) === 'Z';
 
             $item = [
                 'item_id'                 => intval($row['local_ledger_item_id']),
@@ -865,6 +869,10 @@ class TGS_Viettel_Invoice_Plugin
             $all_items[] = $item;
 
             if (!$is_gift) {
+                $main_items[] = $item;
+                if ($is_sku_ends_z) {
+                    $stat_z_main_count++;
+                }
                 if (isset($under24_lookup[$sku]) && $sku !== '') {
                     $has_under24_main = true;
                     $under24_main_skus[] = $sku;
@@ -884,10 +892,12 @@ class TGS_Viettel_Invoice_Plugin
 
         wp_send_json_success([
             'gift_items'               => $gift_items,
+            'main_items'               => $main_items,
             'all_items'                => $all_items,
             'has_under24_main'         => $has_under24_main,
             'under24_main_skus'        => $under24_main_skus,
             'stat_z_sku_count'         => $stat_z_sku_count,
+            'stat_z_main_count'        => $stat_z_main_count,
             'stat_danger_flagged_count' => $stat_danger_flagged_count,
         ]);
     }

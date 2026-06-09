@@ -44,7 +44,7 @@ class TGS_Viettel_Invoice_Flow_Service
         if (defined('TGS_TABLE_LOCAL_LEDGER_PERSON') && !empty($sale['local_ledger_person_id'])) {
             $person = $wpdb->get_row(
                 $wpdb->prepare(
-                    'SELECT local_ledger_person_name, local_ledger_person_address, local_ledger_person_phone FROM ' . TGS_TABLE_LOCAL_LEDGER_PERSON . ' WHERE local_ledger_person_id = %d LIMIT 1',
+                    'SELECT local_ledger_person_name, local_ledger_person_address, local_ledger_person_phone, local_ledger_person_email, local_ledger_person_tax_code FROM ' . TGS_TABLE_LOCAL_LEDGER_PERSON . ' WHERE local_ledger_person_id = %d LIMIT 1',
                     intval($sale['local_ledger_person_id'])
                 ),
                 ARRAY_A
@@ -78,7 +78,7 @@ class TGS_Viettel_Invoice_Flow_Service
         $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
         $items = $wpdb->get_results(
             $wpdb->prepare(
-                'SELECT i.local_ledger_item_id, i.local_product_name_id, i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price' . $optional_select_sql . ',
+                'SELECT i.local_ledger_item_id, i.local_product_name_id, i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price, i.local_ledger_item_tax_percent' . $optional_select_sql . ',
                         p.local_product_name, p.local_product_sku, p.local_product_unit
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  LEFT JOIN ' . TGS_TABLE_LOCAL_PRODUCT_NAME . ' p ON p.local_product_name_id = i.local_product_name_id
@@ -110,6 +110,9 @@ class TGS_Viettel_Invoice_Flow_Service
                 'quantity' => $quantity,
                 'unit_price_after_discount' => $unit_price,
                 'line_total' => $quantity * $unit_price,
+                'tax_percent' => isset($item['local_ledger_item_tax_percent']) && $item['local_ledger_item_tax_percent'] !== null && $item['local_ledger_item_tax_percent'] !== ''
+                    ? floatval($item['local_ledger_item_tax_percent'])
+                    : 8.0,
             ];
         }
 
@@ -123,9 +126,10 @@ class TGS_Viettel_Invoice_Flow_Service
                 'customer' => [
                     'customer_name' => (string) ($person['local_ledger_person_name'] ?? 'Khách lẻ'),
                     'customer_company_name' => (string) ($person['local_ledger_person_name'] ?? 'Khách lẻ'),
-                    'customer_tax_code' => '',
+                    'customer_tax_code' => (string) ($person['local_ledger_person_tax_code'] ?? ''),
                     'customer_address' => (string) ($person['local_ledger_person_address'] ?? ''),
                     'customer_phone' => (string) ($person['local_ledger_person_phone'] ?? ''),
+                    'customer_email' => (string) ($person['local_ledger_person_email'] ?? ''),
                 ],
                 'items' => $source_items,
             ],
@@ -259,16 +263,19 @@ class TGS_Viettel_Invoice_Flow_Service
             ];
         }
 
-        $tax_percent = 8.0;
         $item_info = [];
         $sum_without_tax = 0.0;
         $sum_tax = 0.0;
         $sum_with_tax = 0.0;
+        $tax_breakdown_map = [];
 
         $line_number = 1;
         foreach ($items as $item) {
             $quantity = max(0.0, floatval($item['quantity'] ?? 0));
             $unit_price = max(0.0, floatval($item['unit_price_after_discount'] ?? 0));
+            $tax_percent = isset($item['tax_percent']) && $item['tax_percent'] !== null
+                ? floatval($item['tax_percent'])
+                : 8.0;
 
             if (!empty($item['is_gift'])) {
                 $unit_price = 0.0;
@@ -281,6 +288,17 @@ class TGS_Viettel_Invoice_Flow_Service
             $sum_without_tax += $without_tax;
             $sum_tax         += $tax_amount;
             $sum_with_tax    += $with_tax;
+
+            $key = (string) $tax_percent;
+            if (!isset($tax_breakdown_map[$key])) {
+                $tax_breakdown_map[$key] = [
+                    'taxPercentage' => $tax_percent,
+                    'taxableAmount' => 0,
+                    'taxAmount' => 0,
+                ];
+            }
+            $tax_breakdown_map[$key]['taxableAmount'] += $without_tax;
+            $tax_breakdown_map[$key]['taxAmount'] += $tax_amount;
 
             $item_info[] = [
                 'lineNumber' => $line_number,
@@ -319,8 +337,8 @@ class TGS_Viettel_Invoice_Flow_Service
             'local_ledger_code' => (string) ($filtered_payload['sale_code'] ?? ''),
             'generalInvoiceInfo' => [
                 'invoiceType' => '1',
-                'templateCode' => '1/1156',
-                'invoiceSeries' => 'C25TZN',
+                'templateCode' => !empty($settings['default_template_code']) ? $settings['default_template_code'] : '1/770',
+                'invoiceSeries' => !empty($settings['default_invoice_series']) ? $settings['default_invoice_series'] : 'K23TXM',
                 'currencyCode' => 'VND',
                 'exchangeRate' => 1,
                 'adjustmentType' => '1',
@@ -335,7 +353,7 @@ class TGS_Viettel_Invoice_Flow_Service
                 'buyerTaxCode' => (string) ($customer['customer_tax_code'] ?? ''),
                 'buyerAddressLine' => (string) ($customer['customer_address'] ?? ''),
                 'buyerPhoneNumber' => (string) ($customer['customer_phone'] ?? ''),
-                'buyerEmail' => null,
+                'buyerEmail' => !empty($customer['customer_email']) ? $customer['customer_email'] : null,
                 'buyerNotGetInvoice' => '0',
             ],
             'payments' => [
@@ -345,13 +363,7 @@ class TGS_Viettel_Invoice_Flow_Service
                 ],
             ],
             'itemInfo' => $item_info,
-            'taxBreakdowns' => [
-                [
-                    'taxPercentage' => $tax_percent,
-                    'taxableAmount' => $sum_without_tax,
-                    'taxAmount' => $sum_tax,
-                ],
-            ],
+            'taxBreakdowns' => array_values($tax_breakdown_map),
             'summarizeInfo' => [
                 'sumOfTotalLineAmountWithoutTax' => $sum_without_tax,
                 'totalAmountAfterDiscount' => $sum_without_tax,

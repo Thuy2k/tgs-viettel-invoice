@@ -664,7 +664,8 @@ class TGS_Viettel_Invoice_Plugin
                 $row['invoice_no'] = $this->extract_invoice_no_from_issue_payload($row['issue_response_payload'] ?? '');
                 $row['template_code'] = sanitize_text_field($row['template_code'] ?? '');
                 if ($row['template_code'] === '') {
-                    $row['template_code'] = '1/1156';
+                    $defaults = self::get_default_settings();
+                    $row['template_code'] = $defaults['default_template_code'] ?? '1/1156';
                 }
                 $row['contains_under24_main_item'] = !empty($under24_flags[intval($row['sale_ledger_id'] ?? 0)]) ? 1 : 0;
                 $row['age_group'] = !empty($row['contains_under24_main_item']) ? 'under24' : 'over24';
@@ -820,14 +821,16 @@ class TGS_Viettel_Invoice_Plugin
         $has_local_product_sku = $this->flow_service->local_ledger_item_column_exists('local_product_sku');
         $global_id_sql = $has_global_product_name_id ? ', i.global_product_name_id' : ', 0 AS global_product_name_id';
         $sku_sql = $has_local_product_sku ? ', i.local_product_sku' : ", '' AS local_product_sku";
+        $has_tax_percent = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_tax_percent');
+        $tax_percent_sql = $has_tax_percent ? ', i.local_ledger_item_tax_percent' : ', 0 AS local_ledger_item_tax_percent';
 
         $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
         $rows = $wpdb->get_results(
             $wpdb->prepare(
-                'SELECT i.local_ledger_item_id, i.local_ledger_item_gift_type, i.quantity, i.price,
-                        i.local_ledger_item_meta, i.local_ledger_item_discount, i.local_ledger_item_discount_type, i.local_ledger_item_tax_percent'
-                        . $danger_col_sql . $pad_col_sql . ',
-                        p.local_product_name, p.local_product_sku, p.local_product_unit
+                'SELECT i.local_ledger_item_id, i.local_product_name_id,
+                        i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price,
+                        i.local_ledger_item_discount, i.local_ledger_item_discount_type'
+                        . $tax_percent_sql . $danger_col_sql . $pad_col_sql . $global_id_sql . $sku_sql . '
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  WHERE i.local_ledger_item_id IN (' . $placeholders . ')
                  ORDER BY i.local_ledger_item_id ASC',
@@ -1260,7 +1263,11 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        $template_code = '1/1156';
+        $template_code = sanitize_text_field($latest['template_code'] ?? '');
+        if ($template_code === '') {
+            $defaults = self::get_default_settings();
+            $template_code = $defaults['default_template_code'] ?? '1/1156';
+        }
 
         $settings = self::get_settings();
         $supplier_tax_code = sanitize_text_field($settings['supplier_tax_code'] ?? '');
@@ -1525,7 +1532,12 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        $template_code = '1/1156';
+        $template_code = sanitize_text_field($latest['template_code'] ?? '');
+        if ($template_code === '') {
+            $defaults = self::get_default_settings();
+            $template_code = $defaults['default_template_code'] ?? '1/1156';
+        }
+
         $settings = self::get_settings();
         $supplier_tax_code = sanitize_text_field($settings['supplier_tax_code'] ?? '');
         if ($supplier_tax_code === '') {

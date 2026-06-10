@@ -247,14 +247,19 @@ class TGS_Viettel_Invoice_Flow_Service
             $gift_sku = (string) ($gift_item['sku'] ?? '');
             $parent_sku = trim((string) ($gift_item['gift_parent_sku'] ?? ''));
 
-            // Bỏ quà tặng nếu xác định đi theo hàng chính dưới 24 tháng.
-            if ($parent_sku !== '' && isset($under24_lookup[$parent_sku])) {
-                continue;
-            }
+            // User đã bỏ tích loại trừ (is_under24_promo_danger = false) → tôn trọng, cho gửi.
+            $user_override = isset($gift_item['is_under24_promo_danger']) && empty($gift_item['is_under24_promo_danger']);
 
-            // Trường hợp không có parent rõ ràng: quà có SKU dưới 24m cũng loại bỏ.
-            if ($gift_sku !== '' && isset($under24_lookup[$gift_sku])) {
-                continue;
+            if (!$user_override) {
+                // Bỏ quà tặng nếu xác định đi theo hàng chính dưới 24 tháng.
+                if ($parent_sku !== '' && isset($under24_lookup[$parent_sku])) {
+                    continue;
+                }
+
+                // Trường hợp không có parent rõ ràng: quà có SKU dưới 24m cũng loại bỏ.
+                if ($gift_sku !== '' && isset($under24_lookup[$gift_sku])) {
+                    continue;
+                }
             }
 
             $filtered_gifts[] = $gift_item;

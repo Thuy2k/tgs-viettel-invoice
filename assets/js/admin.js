@@ -12,39 +12,64 @@
             .text(message);
     }
 
-    function getSettingsPayload() {
+    function getCommonSettingsPayload() {
         return {
-            company_name: $('#vi_company_name').val(),
-            supplier_tax_code: $('#vi_supplier_tax_code').val(),
-            company_address: $('#vi_company_address').val(),
-            company_phone: $('#vi_company_phone').val(),
             api_base_url: $('#vi_api_base_url').val(),
             auth_mode: $('#vi_auth_mode').val(),
             username: $('#vi_username').val(),
             password: $('#vi_password').val(),
             access_token: $('#vi_access_token').val(),
+            verify_ssl: $('#vi_verify_ssl').is(':checked') ? 1 : 0,
             default_template_code: $('#vi_default_template_code').val(),
             default_invoice_series: $('#vi_default_invoice_series').val(),
             default_payment_method: $('#vi_default_payment_method').val(),
-            verify_ssl: $('#vi_verify_ssl').is(':checked') ? 1 : 0,
             auto_enabled: $('#vi_auto_enabled').is(':checked') ? 1 : 0,
             auto_mode: $('#vi_auto_mode').val()
         };
     }
 
-    function saveSettings() {
+    function getShopSettingsPayload() {
+        return {
+            company_name: $('#vi_company_name').val(),
+            supplier_tax_code: $('#vi_supplier_tax_code').val(),
+            company_address: $('#vi_company_address').val(),
+            company_phone: $('#vi_company_phone').val()
+        };
+    }
+
+    function saveCommonSettings() {
         $.post(tgsViettelInvoice.ajaxUrl, {
-            action: 'tgs_viettel_invoice_save_settings',
+            action: 'tgs_viettel_invoice_save_common_settings',
             nonce: tgsViettelInvoice.nonce,
-            settings: getSettingsPayload()
+            settings: getCommonSettingsPayload()
         }).done(function (resp) {
             if (resp && resp.success) {
-                showFeedback('#vi_settings_feedback', 'success', resp.data.message || 'Da luu.');
+                showFeedback('#vi_settings_feedback', 'success', resp.data.message || 'Da luu cau hinh chung.');
                 return;
             }
-            showFeedback('#vi_settings_feedback', 'danger', (resp && resp.data && resp.data.message) || 'Khong luu duoc cau hinh.');
+            showFeedback('#vi_settings_feedback', 'danger', (resp && resp.data && resp.data.message) || 'Khong luu duoc cau hinh chung.');
         }).fail(function (xhr) {
-            var msg = 'Co loi khi luu cau hinh.';
+            var msg = 'Co loi khi luu cau hinh chung.';
+            if (xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message) {
+                msg = xhr.responseJSON.data.message;
+            }
+            showFeedback('#vi_settings_feedback', 'danger', msg);
+        });
+    }
+
+    function saveShopSettings() {
+        $.post(tgsViettelInvoice.ajaxUrl, {
+            action: 'tgs_viettel_invoice_save_shop_settings',
+            nonce: tgsViettelInvoice.nonce,
+            settings: getShopSettingsPayload()
+        }).done(function (resp) {
+            if (resp && resp.success) {
+                showFeedback('#vi_settings_feedback', 'success', resp.data.message || 'Da luu cau hinh cua hang.');
+                return;
+            }
+            showFeedback('#vi_settings_feedback', 'danger', (resp && resp.data && resp.data.message) || 'Khong luu duoc cau hinh cua hang.');
+        }).fail(function (xhr) {
+            var msg = 'Co loi khi luu cau hinh cua hang.';
             if (xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message) {
                 msg = xhr.responseJSON.data.message;
             }
@@ -53,9 +78,12 @@
     }
 
     function exportSettings() {
+        var scope = $('#vi_export_scope').val() || 'all';
+
         $.post(tgsViettelInvoice.ajaxUrl, {
             action: 'tgs_viettel_invoice_export_settings',
-            nonce: tgsViettelInvoice.nonce
+            nonce: tgsViettelInvoice.nonce,
+            scope: scope
         }).done(function (resp) {
             if (!(resp && resp.success)) {
                 showFeedback('#vi_settings_feedback', 'danger', 'Khong export duoc JSON.');
@@ -68,25 +96,29 @@
             var a = document.createElement('a');
             var now = new Date();
             var stamp = now.getFullYear() + ('0' + (now.getMonth() + 1)).slice(-2) + ('0' + now.getDate()).slice(-2) + '_' + ('0' + now.getHours()).slice(-2) + ('0' + now.getMinutes()).slice(-2);
+            var blogPart = resp.data.blog_id ? ('blog-' + resp.data.blog_id + '-') : '';
 
             a.href = url;
-            a.download = 'viettel-invoice-settings-blog-' + (resp.data.blog_id || 'unknown') + '-' + stamp + '.json';
+            a.download = 'viettel-invoice-settings-' + blogPart + stamp + '.json';
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
 
-            showFeedback('#vi_settings_feedback', 'success', 'Da export JSON thanh cong.');
+            showFeedback('#vi_settings_feedback', 'success', 'Da export JSON (' + scope + ') thanh cong.');
         }).fail(function () {
             showFeedback('#vi_settings_feedback', 'danger', 'Co loi khi export JSON.');
         });
     }
 
-    function importSettings() {
+    function importSettings(scope) {
+        scope = scope || 'auto';
+
         $.post(tgsViettelInvoice.ajaxUrl, {
             action: 'tgs_viettel_invoice_import_settings',
             nonce: tgsViettelInvoice.nonce,
-            settings_json: $('#vi_import_json').val()
+            settings_json: $('#vi_import_json').val(),
+            scope: scope
         }).done(function (resp) {
             if (resp && resp.success) {
                 showFeedback('#vi_settings_feedback', 'success', resp.data.message || 'Da import. Dang tai lai trang...');
@@ -137,18 +169,29 @@
         });
     }
 
-    $(document).on('click', '#vi_save_settings', function () {
-        saveSettings();
+    // Settings save buttons
+    $(document).on('click', '#vi_save_common_settings', function () {
+        saveCommonSettings();
     });
 
+    $(document).on('click', '#vi_save_shop_settings', function () {
+        saveShopSettings();
+    });
+
+    // Export / Import
     $(document).on('click', '#vi_export_settings', function () {
         exportSettings();
     });
 
     $(document).on('click', '#vi_import_settings', function () {
-        importSettings();
+        importSettings('auto');
     });
 
+    $(document).on('click', '#vi_import_common_settings', function () {
+        importSettings('common');
+    });
+
+    // Send payload (create invoice page)
     $(document).on('click', '.tgs-viettel-send-btn', function () {
         var mode = $(this).data('mode');
         if (['draft', 'issue', 'cancel'].indexOf(mode) === -1) {

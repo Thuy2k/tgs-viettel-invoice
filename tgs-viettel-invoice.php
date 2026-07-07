@@ -441,8 +441,9 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        if (!current_user_can('read')) {
-            wp_send_json_error(['message' => 'Bạn không có quyền xem nhật ký.'], 403);
+        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
+        if (!is_user_logged_in()) {
+            wp_send_json_error(['message' => 'Bạn cần đăng nhập để xem nhật ký.'], 403);
             return;
         }
 
@@ -567,8 +568,9 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        if (!current_user_can('read')) {
-            wp_send_json_error(['message' => 'Bạn không có quyền xem danh sách.'], 403);
+        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
+        if (!is_user_logged_in()) {
+            wp_send_json_error(['message' => 'Bạn cần đăng nhập để xem danh sách.'], 403);
             return;
         }
 
@@ -1041,8 +1043,9 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        if (!current_user_can('read')) {
-            wp_send_json_error(['message' => 'Bạn không có quyền gửi lại hóa đơn.'], 403);
+        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
+        if (!is_user_logged_in()) {
+            wp_send_json_error(['message' => 'Bạn cần đăng nhập để gửi lại hóa đơn.'], 403);
             return;
         }
 
@@ -1223,8 +1226,9 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        if (!current_user_can('read')) {
-            wp_send_json_error(['message' => 'Bạn không có quyền gửi email hóa đơn.'], 403);
+        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
+        if (!is_user_logged_in()) {
+            wp_send_json_error(['message' => 'Bạn cần đăng nhập để gửi email hóa đơn.'], 403);
             return;
         }
 
@@ -1493,8 +1497,9 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        if (!current_user_can('read')) {
-            wp_send_json_error(['message' => 'Bạn không có quyền xem PDF hóa đơn.'], 403);
+        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
+        if (!is_user_logged_in()) {
+            wp_send_json_error(['message' => 'Bạn cần đăng nhập để xem PDF hóa đơn.'], 403);
             return;
         }
 
@@ -2257,8 +2262,9 @@ class TGS_Viettel_Invoice_Plugin
                 return;
             }
 
-            if (!current_user_can('read')) {
-                wp_send_json_error(['message' => 'Bạn không có quyền thực hiện thao tác này.'], 403);
+            // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
+            if (!is_user_logged_in()) {
+                wp_send_json_error(['message' => 'Bạn cần đăng nhập để thực hiện thao tác này.'], 403);
                 return;
             }
 

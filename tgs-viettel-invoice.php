@@ -1696,8 +1696,9 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        if (!current_user_can('read')) {
-            wp_send_json_error(['message' => 'Bạn không có quyền tra cứu khách hàng.'], 403);
+        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
+        if (!is_user_logged_in()) {
+            wp_send_json_error(['message' => 'Bạn cần đăng nhập để tra cứu khách hàng.'], 403);
             return;
         }
 

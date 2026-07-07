@@ -4,104 +4,117 @@ if (!defined('ABSPATH')) {
 }
 
 $settings = TGS_Viettel_Invoice_Plugin::get_settings();
+$is_super_admin = is_super_admin();
+$is_multisite = is_multisite();
 ?>
 
 <div class="container-fluid py-3" id="tgs-viettel-settings-root">
-    <div class="alert alert-info">
-        <h5 class="mb-2">Cau hinh theo tung shop</h5>
-        <div class="mb-0">Cau hinh trong trang nay duoc luu theo site hien tai (khong dung chung toan multisite).</div>
-    </div>
 
-    <div class="card mb-3">
-        <div class="card-header"><strong>Thong tin doanh nghiep</strong></div>
-        <div class="card-body row g-3">
-            <div class="col-md-6">
-                <label class="form-label">Ten cong ty</label>
-                <input type="text" class="form-control" id="vi_company_name" value="<?php echo esc_attr($settings['company_name']); ?>">
-            </div>
-            <div class="col-md-6">
-                <label class="form-label">MST (supplierTaxCode)</label>
-                <input type="text" class="form-control" id="vi_supplier_tax_code" value="<?php echo esc_attr($settings['supplier_tax_code']); ?>">
-            </div>
-            <div class="col-md-8">
-                <label class="form-label">Dia chi</label>
-                <input type="text" class="form-control" id="vi_company_address" value="<?php echo esc_attr($settings['company_address']); ?>">
-            </div>
-            <div class="col-md-4">
-                <label class="form-label">Dien thoai</label>
-                <input type="text" class="form-control" id="vi_company_phone" value="<?php echo esc_attr($settings['company_phone']); ?>">
-            </div>
+    <?php if ($is_multisite): ?>
+    <div class="alert alert-info">
+        <h5 class="mb-2">Cấu hình đa site (Multisite)</h5>
+        <div class="mb-0">
+            <?php if ($is_super_admin): ?>
+            Phần <strong>"Cấu hình chung"</strong> được lưu chung cho toàn mạng. Phần <strong>"Cấu hình cửa hàng"</strong> riêng cho site này.
+            <?php else: ?>
+            Cấu hình trong trang này được lưu riêng cho site hiện tại. Liên hệ Super Admin để thay đổi cấu hình chung.
+            <?php endif; ?>
         </div>
     </div>
+    <?php endif; ?>
 
-    <div class="card mb-3">
-        <div class="card-header"><strong>Ket noi API Viettel</strong></div>
+    <?php if (!$is_multisite || $is_super_admin): ?>
+    <!-- COMMON SETTINGS (network-wide) -->
+    <div class="card mb-3 border-primary">
+        <div class="card-header bg-primary text-white"><strong>Cấu hình chung</strong></div>
         <div class="card-body row g-3">
             <div class="col-md-8">
                 <label class="form-label">API base URL</label>
                 <input type="text" class="form-control" id="vi_api_base_url" value="<?php echo esc_attr($settings['api_base_url']); ?>">
             </div>
             <div class="col-md-4">
-                <label class="form-label">Auth mode</label>
+                <label class="form-label">Phương thức xác thực</label>
                 <select class="form-select" id="vi_auth_mode">
                     <option value="basic" <?php selected($settings['auth_mode'], 'basic'); ?>>Basic Auth</option>
                     <option value="token" <?php selected($settings['auth_mode'], 'token'); ?>>Bearer Token</option>
                 </select>
             </div>
             <div class="col-md-6">
-                <label class="form-label">Username</label>
+                <label class="form-label">Tên đăng nhập</label>
                 <input type="text" class="form-control" id="vi_username" value="<?php echo esc_attr($settings['username']); ?>">
             </div>
             <div class="col-md-6">
-                <label class="form-label">Password</label>
-                <input type="text" class="form-control" id="vi_password" value="<?php echo esc_attr(!empty($settings['password']) ? '********' : ''); ?>" placeholder="Nhap moi hoac de ******** de giu nguyen">
+                <label class="form-label">Mật khẩu</label>
+                <input type="text" class="form-control" id="vi_password" value="<?php echo esc_attr(!empty($settings['password']) ? '********' : ''); ?>" placeholder="Nhập mới hoặc để ******** để giữ nguyên">
             </div>
             <div class="col-md-12">
                 <label class="form-label">Access token</label>
-                <input type="text" class="form-control" id="vi_access_token" value="<?php echo esc_attr(!empty($settings['access_token']) ? '********' : ''); ?>" placeholder="Dung khi auth_mode = token">
+                <input type="text" class="form-control" id="vi_access_token" value="<?php echo esc_attr(!empty($settings['access_token']) ? '********' : ''); ?>" placeholder="Dùng khi auth_mode = token">
+            </div>
+            <div class="col-md-12">
+                <div class="form-check mt-2">
+                    <input class="form-check-input" type="checkbox" id="vi_verify_ssl" <?php checked((int) $settings['verify_ssl'], 1); ?>>
+                    <label class="form-check-label" for="vi_verify_ssl">Bật SSL verify</label>
+                </div>
             </div>
             <div class="col-md-4">
-                <label class="form-label">Template code mac dinh</label>
+                <label class="form-label">Template code mặc định</label>
                 <input type="text" class="form-control" id="vi_default_template_code" value="<?php echo esc_attr($settings['default_template_code']); ?>">
             </div>
             <div class="col-md-4">
-                <label class="form-label">Invoice series mac dinh</label>
+                <label class="form-label">Invoice series mặc định</label>
                 <input type="text" class="form-control" id="vi_default_invoice_series" value="<?php echo esc_attr($settings['default_invoice_series']); ?>">
             </div>
             <div class="col-md-4">
-                <label class="form-label">Payment method mac dinh</label>
+                <label class="form-label">Phương thức thanh toán mặc định</label>
                 <input type="text" class="form-control" id="vi_default_payment_method" value="<?php echo esc_attr($settings['default_payment_method']); ?>">
             </div>
             <div class="col-md-6">
                 <div class="form-check mt-2">
-                    <input class="form-check-input" type="checkbox" id="vi_verify_ssl" <?php checked((int) $settings['verify_ssl'], 1); ?>>
-                    <label class="form-check-label" for="vi_verify_ssl">Bat SSL verify</label>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="form-check mt-2">
                     <input class="form-check-input" type="checkbox" id="vi_auto_enabled" <?php checked((int) $settings['auto_enabled'], 1); ?>>
-                    <label class="form-check-label" for="vi_auto_enabled">Tu dong tao hoa don khi sale completed</label>
+                    <label class="form-check-label" for="vi_auto_enabled">Tự động tạo hóa đơn khi sale completed</label>
                 </div>
                 <select class="form-select mt-2" id="vi_auto_mode">
-                    <option value="draft" <?php selected($settings['auto_mode'], 'draft'); ?>>Auto tao nhap</option>
-                    <option value="issue" <?php selected($settings['auto_mode'], 'issue'); ?>>Auto phat hanh</option>
+                    <option value="draft" <?php selected($settings['auto_mode'], 'draft'); ?>>Tự động tạo nháp</option>
+                    <option value="issue" <?php selected($settings['auto_mode'], 'issue'); ?>>Tự động phát hành</option>
                 </select>
+            </div>
+            <div class="col-12">
+                <button type="button" class="btn btn-primary" id="vi_save_common_settings">Lưu cấu hình chung</button>
             </div>
         </div>
     </div>
+    <?php endif; ?>
 
     <div class="card mb-3">
-        <div class="card-header"><strong>Export / Import cau hinh JSON</strong></div>
+        <div class="card-header"><strong>Xuất / Nhập cấu hình JSON</strong></div>
         <div class="card-body">
             <div class="d-flex gap-2 mb-3">
-                <button type="button" class="btn btn-success" id="vi_export_settings">Export JSON</button>
-                <button type="button" class="btn btn-primary" id="vi_save_settings">Luu cau hinh</button>
+                <button type="button" class="btn btn-success" id="vi_export_settings">Xuất JSON</button>
             </div>
-            <label class="form-label">Import JSON</label>
-            <textarea class="form-control font-monospace" id="vi_import_json" rows="10" placeholder="Paste JSON da export tu shop khac vao day"></textarea>
-            <button type="button" class="btn btn-outline-primary mt-2" id="vi_import_settings">Import JSON vao shop hien tai</button>
-            <div class="small text-muted mt-2">Neu import tu shop giong nhau, ban co the copy nhanh toan bo settings khong can cau hinh lai.</div>
+            <div class="row g-2 align-items-center mb-3">
+                <div class="col-auto">
+                    <label class="form-label mb-0">Phạm vi xuất:</label>
+                </div>
+                <div class="col-auto">
+                    <select class="form-select" id="vi_export_scope">
+                        <?php if ($is_super_admin): ?>
+                        <option value="all">Tất cả (common + shop)</option>
+                        <option value="common">Chỉ common</option>
+                        <?php endif; ?>
+                        <option value="shop" <?php echo $is_super_admin ? '' : 'selected'; ?>>Chỉ cửa hàng này</option>
+                    </select>
+                </div>
+            </div>
+            <label class="form-label">Nhập JSON</label>
+            <textarea class="form-control font-monospace" id="vi_import_json" rows="8" placeholder="Dán JSON đã xuất vào đây"></textarea>
+            <div class="d-flex gap-2 mt-2">
+                <button type="button" class="btn btn-outline-primary" id="vi_import_settings">Nhập vào cửa hàng hiện tại</button>
+                <?php if ($is_super_admin): ?>
+                <button type="button" class="btn btn-outline-danger" id="vi_import_common_settings">Nhập vào common</button>
+                <?php endif; ?>
+            </div>
+            <div class="small text-muted mt-2">Tự động nhận dạng định dạng JSON (v1 flat, v2 common/shop).</div>
         </div>
     </div>
 

@@ -79,7 +79,8 @@ class TGS_Viettel_Invoice_Plugin
         add_action('wp_ajax_tgs_viettel_lookup_customer_by_tax_code', [$this, 'ajax_lookup_customer_by_tax_code']);
 
         // Nút "Gửi CQT" trên popup in hóa đơn POS (ưu tiên 20 để xuất sau nút Xuất HĐDT)
-        add_action('tgs_pos_receipt_footer_buttons', [$this, 'render_cqt_receipt_button'], 20);
+        // [TẠM ẨN - 2026-07-21] Comment lại vì đang trong giai đoạn chưa muốn dùng
+        // add_action('tgs_pos_receipt_footer_buttons', [$this, 'render_cqt_receipt_button'], 20);
 
         // Theo luồng POS mới: KHÔNG tự động gửi thuế ngay khi tạo đơn sale.
         // add_action('tgs_sale_completed', [$this, 'handle_sale_completed'], 20, 1);

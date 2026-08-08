@@ -6,6 +6,60 @@ if (!defined('ABSPATH')) {
 
 class TGS_Viettel_Invoice_Flow_Service
 {
+    /**
+     * Thuế suất của một dòng — KHÔNG có giá trị mặc định.
+     *
+     * ── VÌ SAO KHÔNG ĐOÁN ───────────────────────────────────────────────────
+     *
+     * Thuế suất thuộc về TỪNG MÃ HÀNG; hệ thống đang có cả 8%, 0% và chưa khai.
+     * Dòng nào chưa khai thì KHÔNG được tự điền một con số rồi gửi lên cơ quan
+     * thuế — đoán kiểu gì cũng sai:
+     *
+     *     điền 8% → khai THỪA thuế cho hàng lẽ ra miễn thuế
+     *     điền 0% → khai THIẾU thuế cho hàng chịu thuế
+     *
+     * Hoá đơn đã phát hành thì không sửa được, nên CHẶN LẠI: báo rõ mã hàng nào
+     * thiếu thuế suất để người dùng đi khai, rồi mới xuất hoá đơn. Thà chặn một
+     * lần còn hơn phát hành sai rồi phải giải trình.
+     *
+     * ⚠️ Phân biệt rõ ba trạng thái. `0` là con số THẬT (hàng miễn thuế), khác
+     * hẳn NULL/rỗng (chưa khai). Viết kiểu `?: 8` là biến 0% thành 8%.
+     *
+     * @return float|null  null = dòng này CHƯA khai thuế suất
+     * @see tgs_shop_management/docs/mo-hinh-tien-va-bang-local-ledger-item.md
+     */
+    public static function tax_percent_of($raw)
+    {
+        return ($raw === null || $raw === '') ? null : floatval($raw);
+    }
+
+    /**
+     * Tìm những dòng chưa khai thuế suất.
+     *
+     * Trả về mô tả ngắn của từng dòng thiếu, để người dùng biết phải đi sửa mã
+     * hàng nào — báo chung chung kiểu "thiếu thuế suất" thì đơn vài chục dòng
+     * không ai biết bắt đầu từ đâu.
+     */
+    public static function lines_missing_tax($items, $field = 'tax_percent')
+    {
+        $thieu = [];
+
+        foreach ((array) $items as $it) {
+            $it = (array) $it;
+            if (self::tax_percent_of($it[$field] ?? null) !== null) {
+                continue;
+            }
+
+            $ma    = (string) ($it['sku'] ?? $it['local_product_sku'] ?? '');
+            $ten   = (string) ($it['item_name'] ?? $it['local_product_name'] ?? '');
+            $mo_ta = trim($ma . ($ten !== '' ? ' — ' . $ten : ''));
+
+            $thieu[] = $mo_ta !== '' ? $mo_ta : 'dòng không rõ mã hàng';
+        }
+
+        return array_values(array_unique($thieu));
+    }
+
     public function build_smart_payload_from_sale($sale_ledger_id)
     {
         global $wpdb;
@@ -78,7 +132,7 @@ class TGS_Viettel_Invoice_Flow_Service
         }
         $optional_selects[] = $has_global_product_name_id ? 'i.global_product_name_id' : '0 AS global_product_name_id';
         $optional_selects[] = $has_local_product_sku ? 'i.local_product_sku' : "'' AS local_product_sku";
-        $optional_selects[] = $has_tax_percent ? 'i.local_ledger_item_tax_percent' : '8.0 AS local_ledger_item_tax_percent';
+        $optional_selects[] = $has_tax_percent ? 'i.local_ledger_item_tax_percent' : 'NULL AS local_ledger_item_tax_percent';
         $optional_select_sql = empty($optional_selects) ? '' : ', ' . implode(', ', $optional_selects);
 
         $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
@@ -165,9 +219,28 @@ class TGS_Viettel_Invoice_Flow_Service
                 'quantity' => $quantity,
                 'unit_price_after_discount' => $unit_price,
                 'line_total' => $quantity * $unit_price,
-                'tax_percent' => isset($item['local_ledger_item_tax_percent']) && $item['local_ledger_item_tax_percent'] !== null && $item['local_ledger_item_tax_percent'] !== ''
-                    ? floatval($item['local_ledger_item_tax_percent'])
-                    : 8.0,
+                'tax_percent' => self::tax_percent_of($item['local_ledger_item_tax_percent'] ?? null),
+            ];
+        }
+
+        /*
+         * ─── CHẶN TRƯỚC KHI GỬI: dòng nào chưa khai thuế suất thì dừng ──────
+         *
+         * Phải chặn NGAY TẠI ĐÂY, không để lọt xuống dưới. Nếu để tiếp, giá trị
+         * null sẽ bị floatval() biến thành 0 và hoá đơn lặng lẽ gửi đi với thuế
+         * suất 0% — còn tệ hơn cả việc đoán 8%, vì không ai biết là đã sai.
+         *
+         * Hoá đơn đã phát hành không sửa được, nên thà dừng và báo rõ mã hàng
+         * nào thiếu để người dùng đi khai.
+         */
+        $thieu_thue = self::lines_missing_tax($source_items);
+        if (!empty($thieu_thue)) {
+            return [
+                'success' => false,
+                'message' => 'Chưa xuất được hoá đơn: các mặt hàng sau chưa khai thuế suất — '
+                    . implode('; ', $thieu_thue)
+                    . '. Vào sửa thuế suất cho những mã này rồi xuất lại.',
+                'missing_tax_items' => $thieu_thue,
             ];
         }
 
@@ -333,9 +406,7 @@ class TGS_Viettel_Invoice_Flow_Service
         foreach ($items as $item) {
             $quantity = max(0.0, floatval($item['quantity'] ?? 0));
             $unit_price = max(0.0, floatval($item['unit_price_after_discount'] ?? 0));
-            $tax_percent = isset($item['tax_percent']) && $item['tax_percent'] !== null
-                ? floatval($item['tax_percent'])
-                : 8.0;
+            $tax_percent = self::tax_percent_of($item['tax_percent'] ?? null);
 
             if (!empty($item['is_gift'])) {
                 $unit_price = 0.0;

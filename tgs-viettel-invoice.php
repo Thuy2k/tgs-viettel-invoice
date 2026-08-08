@@ -82,8 +82,17 @@ class TGS_Viettel_Invoice_Plugin
         // [TẠM ẨN - 2026-07-21] Comment lại vì đang trong giai đoạn chưa muốn dùng
         // add_action('tgs_pos_receipt_footer_buttons', [$this, 'render_cqt_receipt_button'], 20);
 
-        // Theo luồng POS mới: KHÔNG tự động gửi thuế ngay khi tạo đơn sale.
-        // add_action('tgs_sale_completed', [$this, 'handle_sale_completed'], 20, 1);
+        /*
+         * Tự động phát hành hoá đơn lên cơ quan thuế ngay khi POS chốt đơn.
+         *
+         * ⚠️ CÓ HAI CÔNG TẮC, hook này chỉ là công tắc thứ nhất. Bên trong
+         * handle_sale_completed() còn kiểm `auto_enabled` trong cài đặt — tắt
+         * cái đó thì hook chạy nhưng không gửi gì. Muốn gửi thật phải bật cả hai.
+         *
+         * Gửi hoá đơn lên cơ quan thuế là việc KHÔNG HOÀN TÁC được: sai thì
+         * phải làm hoá đơn điều chỉnh/thay thế, không xoá đi được.
+         */
+        add_action('tgs_sale_completed', [$this, 'handle_sale_completed'], 20, 1);
 
         if (is_admin() && !wp_doing_ajax()) {
             add_action('admin_init', [$this, 'run_migration']);

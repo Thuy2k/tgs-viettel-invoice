@@ -1032,7 +1032,7 @@ class TGS_Viettel_Invoice_Plugin
             $wpdb->prepare(
                 'SELECT i.local_ledger_item_id, i.local_product_name_id,
                         i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price,
-                        i.local_ledger_item_discount, i.local_ledger_item_discount_type'
+                        i.local_ledger_item_discount_amount'
                         . $tax_percent_sql . $danger_col_sql . $pad_col_sql . $global_id_sql . $sku_sql . '
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  WHERE i.local_ledger_item_id IN (' . $placeholders . ')
@@ -1088,8 +1088,15 @@ class TGS_Viettel_Invoice_Plugin
             $sku = (string) ($row['local_product_sku'] ?? '');
             $danger = $has_danger_col ? intval($row['local_ledger_item_is_under24_promo_danger'] ?? 0) : 0;
 
-            $disc_value = floatval($row['local_ledger_item_discount'] ?? 0);
-            $disc_type = (string) ($row['local_ledger_item_discount_type'] ?? '');
+            /*
+             * CK% suy từ tiền chiết khấu — hai cột discount / discount_type đã
+             * ngừng ghi, và trên dữ liệu cũ cột `discount` còn lẫn lộn giữa
+             * phần trăm và tiền. Xem TGS_Money::discount_percent_of().
+             */
+            $disc_value = class_exists('TGS_Money')
+                ? TGS_Money::discount_percent_of($row, $row['local_ledger_item_discount'] ?? 0)
+                : floatval($row['local_ledger_item_discount'] ?? 0);
+            $disc_type = $disc_value > 0 ? 'percent' : '';
             $price_after_disc = $has_pad_col ? floatval($row['local_ledger_item_price_after_discount'] ?? $row['price']) : floatval($row['price']);
             $tax_percent = floatval($row['local_ledger_item_tax_percent'] ?? 0);
 

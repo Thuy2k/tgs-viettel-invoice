@@ -140,7 +140,7 @@ class TGS_Viettel_Invoice_Flow_Service
             $wpdb->prepare(
                 'SELECT i.local_ledger_item_id, i.local_product_name_id,
                         i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price,
-                        i.local_ledger_item_discount, i.local_ledger_item_discount_type' . $optional_select_sql . '
+                        i.local_ledger_item_discount_amount' . $optional_select_sql . '
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  WHERE i.local_ledger_item_id IN (' . $placeholders . ')
                  ORDER BY i.local_ledger_item_id ASC',
@@ -188,23 +188,29 @@ class TGS_Viettel_Invoice_Flow_Service
                 // Đã lưu sẵn — dùng thẳng, không cần tính lại
                 $unit_price = floatval($item['local_ledger_item_price_after_discount']);
             } else {
-                // Ưu tiên 2: tính từ price (giá gốc chưa KM) + cột discount
-                // local_ledger_item_discount      = giá trị gốc user nhập (vd: 8 cho 8%, 20000 cho 20k VNĐ)
-                // local_ledger_item_discount_type = 'percent' | 'vnd'
-                $raw_price  = floatval($item['price']);
-                $disc_type  = $item['local_ledger_item_discount_type'] ?? 'percent';
-                $disc_value = floatval($item['local_ledger_item_discount'] ?? 0);
+                /*
+                 * Ưu tiên 2: dựng đơn giá sau khuyến mãi từ TIỀN CHIẾT KHẤU.
+                 *
+                 * Trước đây đọc hai cột `local_ledger_item_discount` +
+                 * `..._discount_type` — cả hai ĐÃ NGỪNG GHI, và trên dữ liệu cũ
+                 * cột `discount` còn lẫn lộn ba thứ (phần trăm, tiền cả dòng,
+                 * tiền một đơn vị). Đọc tiếp là **số gửi cơ quan thuế sai**.
+                 *
+                 * `discount_amount` là tiền chiết khấu CẢ DÒNG, trước thuế —
+                 * chia cho số lượng ra đúng đơn giá sau khuyến mãi cần khai.
+                 * Hàng tặng có CK 100% nên tự khắc ra 0.
+                 */
+                $raw_price = floatval($item['price']);
+                $line      = TGS_Money::line(
+                    $quantity,
+                    $raw_price,
+                    floatval($item['local_ledger_item_discount_amount'] ?? 0),
+                    0   /* thuế tính riêng ở dưới, chỗ này chỉ cần giá */
+                );
 
-                if ($disc_value <= 0) {
-                    // Không có khuyến mãi — đơn giá giữ nguyên
-                    $unit_price = $raw_price;
-                } elseif ($disc_type === 'percent') {
-                    // Giảm theo %: price × (1 - disc%) — discount=100% → đơn giá = 0 (hàng tặng)
-                    $unit_price = max(0.0, $raw_price * (1 - $disc_value / 100));
-                } else {
-                    // Giảm theo số tiền VNĐ tính trên 1 đơn vị sản phẩm
-                    $unit_price = max(0.0, $raw_price - $disc_value);
-                }
+                $unit_price = $quantity > 0
+                    ? max(0.0, $line['don_gia_gui_thue'])
+                    : $raw_price;
             }
 
             $source_items[] = [

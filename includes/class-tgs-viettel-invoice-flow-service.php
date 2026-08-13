@@ -60,6 +60,29 @@ class TGS_Viettel_Invoice_Flow_Service
         return array_values(array_unique($thieu));
     }
 
+    /**
+     * Lớp tính tiền dùng cho mọi phép tính trong file này.
+     *
+     * Không tự nhân chia ở đây — công thức nằm ở một chỗ duy nhất, xem
+     * tgs_shop_management/docs/mo-hinh-tien-va-bang-local-ledger-item.md.
+     *
+     * Có hai bản cùng API: `TGS_Money` của tgs_shop_management và `TGS_POS_Money`
+     * của tgs_pos. POS phải bán được ngay cả khi plugin quản trị bị tắt, nên ở
+     * đây nhận cả hai thay vì gọi cứng một cái rồi chết khi thiếu.
+     *
+     * @return string Tên lớp, hoặc chuỗi rỗng nếu không có bản nào.
+     */
+    private static function money_class()
+    {
+        foreach (['TGS_Money', 'TGS_POS_Money'] as $cls) {
+            if (class_exists($cls)) {
+                return $cls;
+            }
+        }
+
+        return '';
+    }
+
     public function build_smart_payload_from_sale($sale_ledger_id)
     {
         global $wpdb;
@@ -117,18 +140,15 @@ class TGS_Viettel_Invoice_Flow_Service
             ];
         }
 
-        $has_price_after_discount = $this->local_ledger_item_column_exists('local_ledger_item_price_after_discount');
+        // Cố ý KHÔNG đọc `local_ledger_item_price_after_discount` — xem giải
+        // thích ở vòng lặp dựng $source_items bên dưới.
         $has_under24_promo_danger = $this->local_ledger_item_column_exists('local_ledger_item_is_under24_promo_danger');
         $has_global_product_name_id = $this->local_ledger_item_column_exists('global_product_name_id');
         $has_local_product_sku = $this->local_ledger_item_column_exists('local_product_sku');
         $has_tax_percent = $this->local_ledger_item_column_exists('local_ledger_item_tax_percent');
         $has_discount_amount = $this->local_ledger_item_column_exists('local_ledger_item_discount_amount');
-        $has_tax_amount = $this->local_ledger_item_column_exists('local_ledger_item_tax_amount');
 
         $optional_selects = [];
-        if ($has_price_after_discount) {
-            $optional_selects[] = 'i.local_ledger_item_price_after_discount';
-        }
         if ($has_under24_promo_danger) {
             $optional_selects[] = 'i.local_ledger_item_is_under24_promo_danger';
         }
@@ -141,8 +161,11 @@ class TGS_Viettel_Invoice_Flow_Service
         $items = $wpdb->get_results(
             $wpdb->prepare(
                 'SELECT i.local_ledger_item_id, i.local_product_name_id,
-                        i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price,
-                        i.local_ledger_item_discount_amount' . $optional_select_sql . '
+                        i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price'
+                        . ($has_discount_amount
+                            ? ', i.local_ledger_item_discount_amount'
+                            : ', 0 AS local_ledger_item_discount_amount')
+                        . $optional_select_sql . '
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  WHERE i.local_ledger_item_id IN (' . $placeholders . ')
                  ORDER BY i.local_ledger_item_id ASC',
@@ -162,58 +185,55 @@ class TGS_Viettel_Invoice_Flow_Service
          * shop áp dụng CTKM như thế nào. Chỉ cần biết: "bán 1 cái giá bao nhiêu".
          *
          * Công thức truyền lên API thuế:
-         *   unitPrice                    = đơn giá sau KM (1 đơn vị)
+         *   unitPrice                    = đơn giá sau CK, trước thuế (1 ĐVCB)
          *   itemTotalAmountAfterDiscount = unitPrice × quantity
          *
-         * Cách lấy đơn giá sau KM (theo thứ tự ưu tiên):
-         *   [1] Cột local_ledger_item_price_after_discount — nếu đã được ghi rõ khi tạo phiếu (> 0)
-         *   [2] Tính ngược từ: price (giá gốc chưa KM) + discount_type + discount_value
-         *       - percent : price × (1 - discount% / 100)   → discount=100% thì = 0 (hàng tặng)
-         *       - vnd     : price − discount_vnd             → không âm
-         *       - không KM: giữ nguyên price
+         * Con số đó chính là "Đơn giá sau CK trước thuế" — công thức (3) của mô
+         * hình tiền, và là thứ DUY NHẤT được phép khai:
          *
-         * Lưu ý: đơn giá truyền lên là giá CHƯA bao gồm VAT (price đã được tách VAT khi tạo phiếu).
-         * VAT được tính và truyền riêng ở bước build_issue_payload_from_filtered().
+         *     (quantity × price − discount_amount) ÷ quantity
+         *
+         * KHÔNG tự cài lại công thức ở đây. Gọi vào lớp tính tiền, vì đó là nơi
+         * duy nhất giữ luật; tự nhân chia rải rác chính là cách dự án đã lệch
+         * số giữa POS, báo cáo và hoá đơn trước đây.
+         *
+         * Lưu ý: giá khai là giá CHƯA gồm VAT. Thuế tính riêng ở bước
+         * build_issue_payload_from_filtered(), và tính trên tiền hàng SAU chiết
+         * khấu chứ không phải trên giá gốc.
+         *
+         * @see tgs_shop_management/docs/mo-hinh-tien-va-bang-local-ledger-item.md
          */
         $source_items = [];
         foreach ($items as $item) {
             $quantity = floatval($item['quantity']);
 
-            // Ưu tiên 1: cột local_ledger_item_price_after_discount nếu đã được lưu (khác NULL/0)
-            $explicit_price_after_discount = $has_price_after_discount
-                && isset($item['local_ledger_item_price_after_discount'])
-                && $item['local_ledger_item_price_after_discount'] !== null
-                && $item['local_ledger_item_price_after_discount'] !== ''
-                && floatval($item['local_ledger_item_price_after_discount']) > 0;
-
-            if ($explicit_price_after_discount) {
-                // Đã lưu sẵn — dùng thẳng, không cần tính lại
-                $unit_price = floatval($item['local_ledger_item_price_after_discount']);
-            } else {
-                /*
-                 * Ưu tiên 2: dựng đơn giá sau khuyến mãi từ TIỀN CHIẾT KHẤU.
-                 *
-                 * Trước đây đọc hai cột `local_ledger_item_discount` +
-                 * `..._discount_type` — cả hai ĐÃ NGỪNG GHI, và trên dữ liệu cũ
-                 * cột `discount` còn lẫn lộn ba thứ (phần trăm, tiền cả dòng,
-                 * tiền một đơn vị). Đọc tiếp là **số gửi cơ quan thuế sai**.
-                 *
-                 * `discount_amount` là tiền chiết khấu CẢ DÒNG, trước thuế —
-                 * chia cho số lượng ra đúng đơn giá sau khuyến mãi cần khai.
-                 * Hàng tặng có CK 100% nên tự khắc ra 0.
-                 */
-                $raw_price = floatval($item['price']);
-                $line      = TGS_Money::line(
-                    $quantity,
-                    $raw_price,
-                    floatval($item['local_ledger_item_discount_amount'] ?? 0),
-                    0   /* thuế tính riêng ở dưới, chỗ này chỉ cần giá */
-                );
-
-                $unit_price = $quantity > 0
-                    ? max(0.0, $line['don_gia_gui_thue'])
-                    : $raw_price;
+            /*
+             * ─── ĐƠN GIÁ GỬI THUẾ LẤY TỪ TGS_Money, KHÔNG TỰ TÍNH ───────────
+             *
+             * Số phải khai là "đơn giá sau CK, trước thuế" — công thức (3)
+             * trong tài liệu: (quantity × price − discount_amount) ÷ quantity.
+             * `from_item()` thực thi đúng công thức đó từ 5 cột gốc.
+             *
+             * ⚠️ TUYỆT ĐỐI KHÔNG lấy `local_ledger_item_price_after_discount`.
+             * Tên cột nghe như đã trừ chiết khấu, nhưng thực tế nó BẰNG ĐÚNG
+             * `price` ở 108/108 dòng bán — tức vẫn là giá TRƯỚC chiết khấu.
+             * Đọc cột đó là khai thiếu chiết khấu với cơ quan thuế: đơn có
+             * giảm giá sẽ bị khai theo giá gốc. Chính `TGS_Money::from_item()`
+             * cũng ghi rõ là CỐ Ý bỏ qua cột này. Xem bẫy 7.1 trong tài liệu.
+             *
+             * Hàng tặng lưu theo cách B (giá gốc + CK 100%) tự khắc ra 0.
+             */
+            $money = self::money_class();
+            if ($money === '') {
+                return [
+                    'success' => false,
+                    'message' => 'Thiếu lớp tính tiền (TGS_Money / TGS_POS_Money). '
+                        . 'Không thể dựng số gửi cơ quan thuế nếu tự tính tay.',
+                ];
             }
+
+            $line       = $money::from_item($item);
+            $unit_price = max(0.0, (float) $line['don_gia_gui_thue']);
 
             $source_items[] = [
                 'ledger_item_id' => intval($item['local_ledger_item_id']),
@@ -226,10 +246,15 @@ class TGS_Viettel_Invoice_Flow_Service
                 'unit_name' => (string) ($item['local_product_unit'] ?? ''),
                 'quantity' => $quantity,
                 'unit_price_after_discount' => $unit_price,
-                'discount_value' => floatval($item['local_ledger_item_discount'] ?? 0),
-                'discount_type' => (string) ($item['local_ledger_item_discount_type'] ?? ''),
                 'discount_amount' => floatval($item['local_ledger_item_discount_amount'] ?? 0),
-                'line_total' => $quantity * $unit_price,
+                /*
+                 * CK% suy từ tiền chiết khấu — công thức (7). Không đọc hai cột
+                 * `local_ledger_item_discount` / `..._discount_type`: chúng nằm
+                 * trong danh sách cột ngừng dùng, và dữ liệu cũ trong cột
+                 * `discount` lẫn lộn cả phần trăm lẫn tiền.
+                 */
+                'discount_percent' => (float) $line['ck_phan_tram'],
+                'line_total' => (float) $line['tien_hang_sau_ck'],
                 'tax_percent' => self::tax_percent_of($item['local_ledger_item_tax_percent'] ?? null),
             ];
         }
@@ -423,12 +448,33 @@ class TGS_Viettel_Invoice_Flow_Service
                 $unit_price = 0.0;
             }
 
-            $without_tax = isset($item['line_total_without_tax'])
-                ? max(0, (int) round(floatval($item['line_total_without_tax'])))
-                : (int) round($quantity * $unit_price);
-            $tax_amount = isset($item['tax_amount']) && $item['tax_amount'] !== null && $item['tax_amount'] !== ''
-                ? max(0, (int) round(floatval($item['tax_amount'])))
-                : (int) round($without_tax * $tax_percent / 100);
+            /*
+             * Tiền hàng và tiền thuế của dòng — công thức (2) và (4), do lớp
+             * tính tiền thực thi. Không tự nhân chia ở đây.
+             *
+             * `$unit_price` ĐÃ là đơn giá sau chiết khấu, nên tham số chiết khấu
+             * truyền vào 0; truyền lại discount_amount là trừ hai lần.
+             *
+             * Thuế tính trên tiền hàng SAU chiết khấu — giảm giá thì thuế giảm
+             * theo, đúng luật và đúng cách phần mềm cũ làm.
+             */
+            $money = self::money_class();
+            if ($money === '') {
+                return [
+                    'success' => false,
+                    'message' => 'Thiếu lớp tính tiền (TGS_Money / TGS_POS_Money). '
+                        . 'Không thể dựng số gửi cơ quan thuế nếu tự tính tay.',
+                ];
+            }
+
+            $line        = $money::line($quantity, $unit_price, 0, $tax_percent);
+            $without_tax = max(0, (int) round($line['tien_hang_sau_ck']));
+            $tax_amount  = max(0, (int) round($line['thue']));
+            /*
+             * Cộng lại từ hai số ĐÃ làm tròn, không làm tròn `thanh_tien` riêng:
+             * làm tròn riêng có thể lệch 1đ so với tổng hai dòng trên, và Viettel
+             * đối chiếu tổng nên sẽ trả về lỗi.
+             */
             $with_tax    = $without_tax + $tax_amount;
 
             $sum_without_tax += $without_tax;
@@ -593,37 +639,21 @@ class TGS_Viettel_Invoice_Flow_Service
         return '';
     }
 
-    private function resolve_item_line_total_without_tax(array $item, $quantity, $unit_price)
-    {
-        $quantity = max(0.0, floatval($quantity));
-        $unit_price = max(0.0, floatval($unit_price));
-
-        if ($quantity <= 0) {
-            return 0;
-        }
-
-        $raw_subtotal = floatval($item['price'] ?? 0) * $quantity;
-        $discount_amount = floatval($item['local_ledger_item_discount_amount'] ?? 0);
-        if ($discount_amount > 0) {
-            return max(0, round($raw_subtotal - $discount_amount));
-        }
-
-        return round($quantity * $unit_price);
-    }
-
-    private function resolve_item_tax_amount(array $item, $quantity, $unit_price)
-    {
-        if (isset($item['local_ledger_item_tax_amount']) && $item['local_ledger_item_tax_amount'] !== null && $item['local_ledger_item_tax_amount'] !== '') {
-            return max(0, round(floatval($item['local_ledger_item_tax_amount'])));
-        }
-
-        $line_total_without_tax = $this->resolve_item_line_total_without_tax($item, $quantity, $unit_price);
-        $tax_percent = isset($item['local_ledger_item_tax_percent']) && $item['local_ledger_item_tax_percent'] !== null && $item['local_ledger_item_tax_percent'] !== ''
-            ? floatval($item['local_ledger_item_tax_percent'])
-            : 8.0;
-
-        return max(0, round($line_total_without_tax * $tax_percent / 100));
-    }
+    /*
+     * ─── ĐÃ XOÁ: resolve_item_line_total_without_tax() và resolve_item_tax_amount()
+     *
+     * Hai hàm đó tự cài lại công thức (1)(2)(4) trong khi lớp tính tiền đã có
+     * sẵn, và tệ hơn: khi dòng chưa khai thuế suất thì `resolve_item_tax_amount()`
+     * mặc định lấy `8.0`.
+     *
+     * Đúng cái bẫy mà đầu file này cảnh báo — `0` là hàng miễn thuế THẬT, khác
+     * hẳn NULL là chưa khai. Điền đại 8% cho dòng chưa khai là khai THỪA thuế
+     * cho hàng lẽ ra miễn thuế, mà hoá đơn đã phát hành thì không sửa được.
+     * Cách xử lý đúng đã có sẵn: lines_missing_tax() chặn lại và báo rõ mã hàng.
+     *
+     * Cả hai chưa từng được gọi ở đâu, nhưng để lại là sớm muộn có người nối
+     * dây vào. Cần tính tiền thì gọi money_class().
+     */
 
     private function build_invoice_item_note(array $item)
     {
@@ -633,17 +663,21 @@ class TGS_Viettel_Invoice_Flow_Service
             $notes[] = 'Hang tang khuyen mai';
         }
 
+        /*
+         * CK% đã được suy sẵn từ tiền chiết khấu ở build_smart_payload_from_sale().
+         * Trước đây chỗ này đọc `discount_type` / `discount_value` — hai cột
+         * ngừng dùng, thậm chí không nằm trong câu SELECT, nên nhánh phần trăm
+         * không bao giờ chạy.
+         */
         $discount_amount = max(0, (int) round(floatval($item['discount_amount'] ?? 0)));
-        $discount_value = floatval($item['discount_value'] ?? 0);
-        $discount_type = (string) ($item['discount_type'] ?? '');
+        $discount_percent = floatval($item['discount_percent'] ?? 0);
 
-        if ($discount_amount > 0 || $discount_value > 0) {
-            if ($discount_type === 'percent' && $discount_value > 0) {
-                $discount_percent = rtrim(rtrim(number_format($discount_value, 2, '.', ''), '0'), '.');
-                $notes[] = 'Chiet khau ' . $discount_percent . '%' . ($discount_amount > 0 ? ' (' . number_format($discount_amount, 0, ',', '.') . 'd)' : '');
-            } elseif ($discount_amount > 0) {
-                $notes[] = 'Chiet khau ' . number_format($discount_amount, 0, ',', '.') . 'd';
+        if ($discount_amount > 0) {
+            $note = 'Chiet khau ' . number_format($discount_amount, 0, ',', '.') . 'd';
+            if ($discount_percent > 0) {
+                $note .= ' (' . rtrim(rtrim(number_format($discount_percent, 2, '.', ''), '0'), '.') . '%)';
             }
+            $notes[] = $note;
         }
 
         return implode(' | ', $notes);

@@ -3,7 +3,7 @@
  * Plugin Name: TGS Viettel Invoice
  * Plugin URI:  https://thegioisua.vn
  * Description: Tạo hóa đơn nháp/phát hành trên Viettel VInvoice, tích hợp vào TGS Shop Management.
- * Version:     1.1.4
+ * Version:     1.1.5
  * Author:      TGS Team
  * Text Domain: tgs-viettel-invoice
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TGS_VIETTEL_INVOICE_VERSION', '1.1.4');
+define('TGS_VIETTEL_INVOICE_VERSION', '1.1.5');
 define('TGS_VIETTEL_INVOICE_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TGS_VIETTEL_INVOICE_PLUGIN_URL', plugin_dir_url(__FILE__));
 

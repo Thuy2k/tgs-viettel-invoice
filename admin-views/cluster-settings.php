@@ -21,8 +21,6 @@ $can_manage_clusters = $cluster_manager && $cluster_manager->can_manage_all();
             <button type="button" class="btn btn-outline-secondary btn-sm" id="vi-cluster-refresh">Tải lại</button>
             <button type="button" class="btn btn-outline-warning btn-sm" id="vi-cluster-unassigned">Shop chưa
                 gán</button>
-            <?php if ($can_manage_clusters): ?><button type="button" class="btn btn-outline-info btn-sm"
-                id="vi-cluster-migration-preview">Phân tích cấu hình cũ</button><?php endif; ?>
             <span class="small text-muted" id="vi-cluster-summary"></span>
         </div>
         <div id="vi-cluster-feedback" class="alert d-none"></div>

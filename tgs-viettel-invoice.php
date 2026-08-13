@@ -977,7 +977,20 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_get_sale_debug_log()
     {
-        $this->guard_pos_ajax(true);
+        $this->bootstrap_requested_blog_context();
+        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+        if (
+            empty($nonce)
+            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
+        ) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+            return;
+        }
+
+        if (!$this->current_user_can_use_pos()) {
+            wp_send_json_error(['message' => 'Bạn không có quyền xem nhật ký.'], 403);
+            return;
+        }
 
         if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE') || !defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE_LOG')) {
             wp_send_json_error(['message' => 'Chưa tìm thấy bảng log Viettel Invoice.'], 500);
@@ -1091,7 +1104,20 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_pos_list_statuses()
     {
-        $this->guard_pos_ajax();
+        $this->bootstrap_requested_blog_context();
+        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+        if (
+            empty($nonce)
+            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
+        ) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+            return;
+        }
+
+        if (!$this->current_user_can_use_pos()) {
+            wp_send_json_error(['message' => 'Bạn không có quyền xem danh sách.'], 403);
+            return;
+        }
 
         if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE') || !defined('TGS_TABLE_LOCAL_LEDGER')) {
             wp_send_json_error(['message' => 'Chưa tìm thấy bảng dữ liệu cần thiết.'], 500);
@@ -1357,9 +1383,9 @@ class TGS_Viettel_Invoice_Plugin
         $rows = $wpdb->get_results(
             $wpdb->prepare(
                 'SELECT i.local_ledger_item_id, i.local_product_name_id,
-                        i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price'
-                        . $discount_amount_sql . $tax_percent_sql . $tax_amount_sql
-                        . $danger_col_sql . $pad_col_sql . $global_id_sql . $sku_sql . '
+                        i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price,
+                        i.local_ledger_item_discount, i.local_ledger_item_discount_type'
+                        . $tax_percent_sql . $discount_amount_sql . $tax_amount_sql . $danger_col_sql . $pad_col_sql . $global_id_sql . $sku_sql . '
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  WHERE i.local_ledger_item_id IN (' . $placeholders . ')
                  ORDER BY i.local_ledger_item_id ASC',
@@ -1423,6 +1449,13 @@ class TGS_Viettel_Invoice_Plugin
                 ? TGS_Money::discount_percent_of($row, $row['local_ledger_item_discount'] ?? 0)
                 : floatval($row['local_ledger_item_discount'] ?? 0);
             $disc_type = $disc_value > 0 ? 'percent' : '';
+
+            /*
+             * Giữ lại từ nhánh kia khi gộp code: `$disc_amount` được dùng thẳng
+             * ở mảng $item bên dưới ('discount_amount' => $disc_amount). Nhánh
+             * tính CK% bỏ mất dòng này, và đó chính là nguồn của cảnh báo
+             * "Undefined variable $disc_amount" từng thấy trong debug.log.
+             */
             $disc_amount = floatval($row['local_ledger_item_discount_amount'] ?? 0);
             $price_after_disc = $has_pad_col ? floatval($row['local_ledger_item_price_after_discount'] ?? $row['price']) : floatval($row['price']);
             $tax_percent = array_key_exists('local_ledger_item_tax_percent', $row) && $row['local_ledger_item_tax_percent'] !== null
@@ -1584,7 +1617,24 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_pos_retry_invoice()
     {
+<<<<<<< HEAD
         $this->guard_pos_ajax();
+=======
+        $this->bootstrap_requested_blog_context();
+        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+        if (
+            empty($nonce)
+            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
+        ) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+            return;
+        }
+
+        if (!$this->current_user_can_use_pos()) {
+            wp_send_json_error(['message' => 'Bạn không có quyền gửi lại hóa đơn.'], 403);
+            return;
+        }
+>>>>>>> d5830158b1e077248841081c94e7da4ce735f149
 
         if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
             wp_send_json_error(['message' => 'Chưa tìm thấy bảng theo dõi hóa đơn Viettel.'], 500);
@@ -1768,7 +1818,24 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_pos_send_invoice_email()
     {
+<<<<<<< HEAD
         $this->guard_pos_ajax();
+=======
+        $this->bootstrap_requested_blog_context();
+        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+        if (
+            empty($nonce)
+            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
+        ) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+            return;
+        }
+
+        if (!$this->current_user_can_use_pos()) {
+            wp_send_json_error(['message' => 'Bạn không có quyền gửi email hóa đơn.'], 403);
+            return;
+        }
+>>>>>>> d5830158b1e077248841081c94e7da4ce735f149
 
         if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
             wp_send_json_error(['message' => 'Chưa tìm thấy bảng theo dõi hóa đơn Viettel.'], 500);
@@ -2079,7 +2146,24 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_pos_preview_invoice_pdf()
     {
+<<<<<<< HEAD
         $this->guard_pos_ajax();
+=======
+        $this->bootstrap_requested_blog_context();
+        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+        if (
+            empty($nonce)
+            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
+        ) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+            return;
+        }
+
+        if (!$this->current_user_can_use_pos()) {
+            wp_send_json_error(['message' => 'Bạn không có quyền xem PDF hóa đơn.'], 403);
+            return;
+        }
+>>>>>>> d5830158b1e077248841081c94e7da4ce735f149
 
         if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
             wp_send_json_error(['message' => 'Chưa tìm thấy bảng theo dõi hóa đơn Viettel.'], 500);
@@ -2225,6 +2309,8 @@ class TGS_Viettel_Invoice_Plugin
         $url = $base . '/InvoiceAPI/InvoiceUtilsWS/getInvoiceRepresentationFile';
         $headers = [
             'Content-Type' => 'application/json',
+            // Cùng lý do với submit_invoice_payload() — xem giải thích ở đó.
+            'Connection'   => 'keep-alive',
         ];
 
         if (($settings['auth_mode'] ?? 'basic') === 'token') {
@@ -2245,6 +2331,9 @@ class TGS_Viettel_Invoice_Plugin
             'headers' => $headers,
             'body' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
             'timeout' => 60,
+            // Bắt buộc 1.1 — xem giải thích dài ở submit_invoice_payload().
+            // Để mặc định (1.0) là dính cURL error 56 trên máy có OpenSSL 3.
+            'httpversion' => '1.1',
             'sslverify' => !empty($settings['verify_ssl']),
         ]);
 
@@ -2386,6 +2475,9 @@ class TGS_Viettel_Invoice_Plugin
 
         $headers = [
             'Content-Type' => 'application/json',
+            // Xem khối giải thích ở dưới, chỗ $http_args. Bắt buộc phải khai
+            // tường minh: WordPress tự gắn `Connection: close` nếu để trống.
+            'Connection'   => 'keep-alive',
         ];
 
         if ($settings['auth_mode'] === 'token') {
@@ -2394,6 +2486,43 @@ class TGS_Viettel_Invoice_Plugin
             $token = base64_encode($settings['username'] . ':' . $settings['password']);
             $headers['Authorization'] = 'Basic ' . $token;
         }
+
+        /*
+         * ─── PHẢI GIỮ KẾT NỐI KEEP-ALIVE, KHÔNG ĐỂ WORDPRESS TỰ ĐÓNG ────────
+         *
+         * Gateway Viettel, khi kết thúc một kết nối kiểu đóng-ngay, cắt thẳng
+         * TCP mà KHÔNG gửi `close_notify` của TLS. Từ OpenSSL 3.0 trở đi đó là
+         * lỗi cứng chứ không còn được bỏ qua:
+         *
+         *     cURL error 56: OpenSSL SSL_read: error:0A000126:SSL routines::
+         *     unexpected eof while reading
+         *
+         * Khi đó wp_remote_post() trả WP_Error, http_code = 0, không đọc được
+         * gì — dù Viettel đã trả lời đầy đủ. Máy nào còn OpenSSL 1.1.1 thì vẫn
+         * chạy vì 1.1.1 lặng lẽ bỏ qua. Đó là lý do cùng một bản code mà web
+         * thật + máy local chạy được còn server UAT (Ubuntu 22.04 / OpenSSL
+         * 3.0.2) thì hỏng — rất dễ tưởng nhầm là lỗi mạng hoặc lỗi tài khoản.
+         *
+         * Cần CẢ HAI thứ dưới đây, thiếu một là vẫn lỗi:
+         *
+         *   [1] 'httpversion' => '1.1'
+         *       WordPress mặc định 1.0 (`WP_Http::request()` đặt sẵn), mà
+         *       HTTP/1.0 thì tự hàm ý đóng kết nối.
+         *
+         *   [2] header 'Connection: keep-alive' khai TƯỜNG MINH
+         *       Chỉ đặt [1] là CHƯA ĐỦ: thư viện Requests của WordPress vẫn tự
+         *       gắn `Connection: close` vào request. Đã đo trên server UAT —
+         *       httpversion 1.1 mà để Requests tự gắn header thì vẫn lỗi 56;
+         *       thêm keep-alive vào mới trả về bình thường.
+         *
+         * ⚠️ Đừng gỡ dòng nào trong hai dòng đó cho "gọn".
+         */
+        $http_args = [
+            'headers'     => $headers,
+            'timeout'     => 45,
+            'httpversion' => '1.1',
+            'sslverify'   => !empty($settings['verify_ssl']),
+        ];
 
         // send_cqt endpoint dùng form-urlencoded theo tài liệu thực tế Viettel
         if ($mode === 'send_cqt') {
@@ -2410,20 +2539,11 @@ class TGS_Viettel_Invoice_Plugin
             ];
             $headers['Content-Type'] = 'application/x-www-form-urlencoded';
             $request_body = http_build_query($form_params);
-            $response = wp_remote_post($url, [
-                'headers' => $headers,
-                'body'    => $request_body,
-                'timeout' => 45,
-                'sslverify' => !empty($settings['verify_ssl']),
-            ]);
+            $http_args['headers'] = $headers;
+            $response = wp_remote_post($url, $http_args + ['body' => $request_body]);
         } else {
             $request_body = wp_json_encode($payload, JSON_UNESCAPED_UNICODE);
-            $response = wp_remote_post($url, [
-                'headers' => $headers,
-                'body'    => $request_body,
-                'timeout' => 45,
-                'sslverify' => !empty($settings['verify_ssl']),
-            ]);
+            $response = wp_remote_post($url, $http_args + ['body' => $request_body]);
         }
 
         $http_code = 0;
@@ -2983,7 +3103,24 @@ class TGS_Viettel_Invoice_Plugin
          */
         public function ajax_send_from_sale()
         {
+<<<<<<< HEAD
             $this->guard_pos_ajax();
+=======
+            $this->bootstrap_requested_blog_context();
+            $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+            if (
+                empty($nonce)
+                || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
+            ) {
+                wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+                return;
+            }
+
+            if (!$this->current_user_can_use_pos()) {
+                wp_send_json_error(['message' => 'Bạn không có quyền thực hiện thao tác này.'], 403);
+                return;
+            }
+>>>>>>> d5830158b1e077248841081c94e7da4ce735f149
 
             $sale_ledger_id = intval($_POST['sale_ledger_id'] ?? 0);
             $force_under24  = !empty($_POST['force_under24']); // nhân viên đã xác nhận cảnh báo

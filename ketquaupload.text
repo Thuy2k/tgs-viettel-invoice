@@ -1,0 +1,111 @@
+======================================================================
+SO SANH CURL: PHP vs SHELL
+======================================================================
+Chay bang:             PHP qua web (php-fpm)
+User he dieu hanh:     www
+PHP:                   8.3.31
+php.ini:               /www/server/php/83/etc/php.ini
+libcurl cua PHP:       7.81.0 / OpenSSL/3.0.2
+OpenSSL cua PHP:       OpenSSL 3.0.2 15 Mar 2022
+openssl.cafile:        /etc/ssl/certs/ca-certificates.crt
+curl.cainfo:           /etc/ssl/certs/ca-certificates.crt
+open_basedir:          /www/wwwroot/trainghiem.tgs-soft-uat.thegioisua.com/:/tmp/
+
+======================================================================
+A. CURL THUAN CUA PHP (khong qua WordPress)
+======================================================================
+Dong dau tien la quan trong nhat: PHP goi curl toi gian co chay khong.
+
+  toi gian (chi RETURNTRANSFER)                OK    HTTP 500  109 byte
+  + ep HTTP/1.1                                OK    HTTP 500  109 byte
+  + ep HTTP/1.0 (tat chunked)                  LOI   curl errno 56
+                                                     OpenSSL SSL_read: error:0A000126:SSL routines::unexpected eof while reading, errno 0
+  + Connection: close                          LOI   curl errno 56
+                                                     OpenSSL SSL_read: error:0A000126:SSL routines::unexpected eof while reading, errno 0
+  + CURLOPT_ENCODING rong (nhan gzip)          OK    HTTP 500  109 byte
+  + Accept-Encoding kieu WordPress             OK    HTTP 500  127 byte
+  + User-Agent kieu WordPress                  OK    HTTP 500  109 byte
+  + tat verify SSL                             OK    HTTP 500  109 byte
+  + ep IPv4                                    OK    HTTP 500  109 byte
+  + POST body {} nhu luc that                  OK    HTTP 500  109 byte
+
+  --- doi chieu: trang chu / (duong PHP van goi duoc) ---
+  GET / toi gian                               OK    HTTP 200  6318 byte
+
+======================================================================
+B. QUA WORDPRESS HTTP API
+======================================================================
+Kiem chung ban vá: dat 'httpversion' => '1.1' co du de cuu khong.
+Can biet vi WordPress co the VAN tu gan 'Connection: close' — ma rieng
+header do cung du gay loi 56 (xem muc A).
+
+  wp_remote_get MAC DINH (httpversion 1.0)     LOI   http_request_failed
+                                                     cURL error 56: OpenSSL SSL_read: error:0A000126:SSL routines::unexpected eof while reading, errno 0
+  wp_remote_get + httpversion '1.1'            LOI   http_request_failed
+                                                     cURL error 56: OpenSSL SSL_read: error:0A000126:SSL routines::unexpected eof while reading, errno 0
+  wp_remote_get + 1.1 + Connection: keep-alive OK    HTTP 500  109 byte
+
+  --- WordPress THUC SU gui di nhung dong nao (bien the httpversion 1.1) ---
+    > GET /services/einvoiceapplication/api/InvoiceAPI/InvoiceWS/createInvoice/0100109106-507 HTTP/1.1
+    Connection: close
+    < Connection: close
+
+  => BAN VÁ CHUA DU. Dat httpversion 1.1 khong cuu duoc; xem cac dong
+     '>' o tren de biet WordPress con gan them header gi.
+
+======================================================================
+B2. FILE TREN SERVER DA CO BAN VÁ CHUA?
+======================================================================
+  File:                          /www/wwwroot/trainghiem.tgs-soft-uat.thegioisua.com/wp-content/plugins/tgs-viettel-invoice/tgs-viettel-invoice.php
+  Sua lan cuoi:                  2026-08-13 05:23:27
+  md5:                           7416bc6c1dc1e9883b675b020f55a62e
+  So dong 'httpversion' => '1.1': 2 (can >= 2)
+
+  File da co ban vá. Neu van loi thi la do OPcache giu ban cu:
+  => Reload PHP-FPM (aaPanel > PHP > Khoi dong lai) roi thu lai.
+
+======================================================================
+C. NHAT KY VERBOSE CUA CURL (bien the toi gian)
+======================================================================
+Xem chinh xac ket noi dut o buoc nao.
+
+  *   Trying 171.244.149.213:443...
+  * Connected to api-vinvoice.viettel.vn (171.244.149.213) port 443 (#0)
+  * ALPN, offering h2
+  * ALPN, offering http/1.1
+  *  CAfile: /etc/ssl/certs/ca-certificates.crt
+  *  CApath: /etc/ssl/certs
+  * SSL connection using TLSv1.2 / ECDHE-RSA-AES128-GCM-SHA256
+  * ALPN, server did not agree to a protocol
+  * Server certificate:
+  *  subject: C=VN; ST=Hanoi; L=Hanoi; O=VIETTEL TELECOM CORPORATION - BRANCH OF VIETTEL GROUP; CN=*.viettel.vn
+  *  start date: Dec 11 11:17:03 2025 GMT
+  *  expire date: Jan  3 02:26:07 2027 GMT
+  *  subjectAltName: host "api-vinvoice.viettel.vn" matched cert's "*.viettel.vn"
+  *  issuer: C=BE; O=GlobalSign nv-sa; CN=GlobalSign RSA OV SSL CA 2018
+  *  SSL certificate verify ok.
+  > GET /services/einvoiceapplication/api/InvoiceAPI/InvoiceWS/createInvoice/0100109106-507 HTTP/1.1
+  Host: api-vinvoice.viettel.vn
+  Accept: */*
+  
+  * Mark bundle as not supporting multiuse
+  < HTTP/1.1 500 Internal Server Error
+  < Expires: 0
+  < Cache-Control: no-cache, no-store, max-age=0, must-revalidate
+  < X-XSS-Protection: 1; mode=block
+  < Pragma: no-cache
+  < Date: Thu, 13 Aug 2026 06:00:27 GMT
+  < Connection: keep-alive
+  < X-Content-Type-Options: nosniff
+  < Transfer-Encoding: chunked
+  < Content-Type: application/json;charset=UTF-8
+  < 
+  * Connection #0 to host api-vinvoice.viettel.vn left intact
+
+======================================================================
+CACH DOC
+======================================================================
+  curl thuan cua PHP CHAY DUOC => loi do thu gi do WordPress them vao.
+  Xem muc B va doi chieu voi cac bien the o muc A de biet la tham so nao.
+
+>>> XOA FILE NAY SAU KHI CHAN DOAN XONG. <<<

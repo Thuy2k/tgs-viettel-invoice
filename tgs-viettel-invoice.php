@@ -1934,6 +1934,8 @@ class TGS_Viettel_Invoice_Plugin
         $url = $base . '/InvoiceAPI/InvoiceUtilsWS/getInvoiceRepresentationFile';
         $headers = [
             'Content-Type' => 'application/json',
+            // Cùng lý do với submit_invoice_payload() — xem giải thích ở đó.
+            'Connection'   => 'keep-alive',
         ];
 
         if (($settings['auth_mode'] ?? 'basic') === 'token') {
@@ -1954,6 +1956,9 @@ class TGS_Viettel_Invoice_Plugin
             'headers' => $headers,
             'body' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
             'timeout' => 60,
+            // Bắt buộc 1.1 — xem giải thích dài ở submit_invoice_payload().
+            // Để mặc định (1.0) là dính cURL error 56 trên máy có OpenSSL 3.
+            'httpversion' => '1.1',
             'sslverify' => !empty($settings['verify_ssl']),
         ]);
 
@@ -2073,6 +2078,9 @@ class TGS_Viettel_Invoice_Plugin
 
         $headers = [
             'Content-Type' => 'application/json',
+            // Xem khối giải thích ở dưới, chỗ $http_args. Bắt buộc phải khai
+            // tường minh: WordPress tự gắn `Connection: close` nếu để trống.
+            'Connection'   => 'keep-alive',
         ];
 
         if ($settings['auth_mode'] === 'token') {
@@ -2081,6 +2089,43 @@ class TGS_Viettel_Invoice_Plugin
             $token = base64_encode($settings['username'] . ':' . $settings['password']);
             $headers['Authorization'] = 'Basic ' . $token;
         }
+
+        /*
+         * ─── PHẢI GIỮ KẾT NỐI KEEP-ALIVE, KHÔNG ĐỂ WORDPRESS TỰ ĐÓNG ────────
+         *
+         * Gateway Viettel, khi kết thúc một kết nối kiểu đóng-ngay, cắt thẳng
+         * TCP mà KHÔNG gửi `close_notify` của TLS. Từ OpenSSL 3.0 trở đi đó là
+         * lỗi cứng chứ không còn được bỏ qua:
+         *
+         *     cURL error 56: OpenSSL SSL_read: error:0A000126:SSL routines::
+         *     unexpected eof while reading
+         *
+         * Khi đó wp_remote_post() trả WP_Error, http_code = 0, không đọc được
+         * gì — dù Viettel đã trả lời đầy đủ. Máy nào còn OpenSSL 1.1.1 thì vẫn
+         * chạy vì 1.1.1 lặng lẽ bỏ qua. Đó là lý do cùng một bản code mà web
+         * thật + máy local chạy được còn server UAT (Ubuntu 22.04 / OpenSSL
+         * 3.0.2) thì hỏng — rất dễ tưởng nhầm là lỗi mạng hoặc lỗi tài khoản.
+         *
+         * Cần CẢ HAI thứ dưới đây, thiếu một là vẫn lỗi:
+         *
+         *   [1] 'httpversion' => '1.1'
+         *       WordPress mặc định 1.0 (`WP_Http::request()` đặt sẵn), mà
+         *       HTTP/1.0 thì tự hàm ý đóng kết nối.
+         *
+         *   [2] header 'Connection: keep-alive' khai TƯỜNG MINH
+         *       Chỉ đặt [1] là CHƯA ĐỦ: thư viện Requests của WordPress vẫn tự
+         *       gắn `Connection: close` vào request. Đã đo trên server UAT —
+         *       httpversion 1.1 mà để Requests tự gắn header thì vẫn lỗi 56;
+         *       thêm keep-alive vào mới trả về bình thường.
+         *
+         * ⚠️ Đừng gỡ dòng nào trong hai dòng đó cho "gọn".
+         */
+        $http_args = [
+            'headers'     => $headers,
+            'timeout'     => 45,
+            'httpversion' => '1.1',
+            'sslverify'   => !empty($settings['verify_ssl']),
+        ];
 
         // send_cqt endpoint dùng form-urlencoded theo tài liệu thực tế Viettel
         if ($mode === 'send_cqt') {
@@ -2097,20 +2142,11 @@ class TGS_Viettel_Invoice_Plugin
             ];
             $headers['Content-Type'] = 'application/x-www-form-urlencoded';
             $request_body = http_build_query($form_params);
-            $response = wp_remote_post($url, [
-                'headers' => $headers,
-                'body'    => $request_body,
-                'timeout' => 45,
-                'sslverify' => !empty($settings['verify_ssl']),
-            ]);
+            $http_args['headers'] = $headers;
+            $response = wp_remote_post($url, $http_args + ['body' => $request_body]);
         } else {
             $request_body = wp_json_encode($payload, JSON_UNESCAPED_UNICODE);
-            $response = wp_remote_post($url, [
-                'headers' => $headers,
-                'body'    => $request_body,
-                'timeout' => 45,
-                'sslverify' => !empty($settings['verify_ssl']),
-            ]);
+            $response = wp_remote_post($url, $http_args + ['body' => $request_body]);
         }
 
         $http_code = 0;

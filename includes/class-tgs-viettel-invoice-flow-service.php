@@ -68,6 +68,8 @@ class TGS_Viettel_Invoice_Flow_Service
         $has_global_product_name_id = $this->local_ledger_item_column_exists('global_product_name_id');
         $has_local_product_sku = $this->local_ledger_item_column_exists('local_product_sku');
         $has_tax_percent = $this->local_ledger_item_column_exists('local_ledger_item_tax_percent');
+        $has_discount_amount = $this->local_ledger_item_column_exists('local_ledger_item_discount_amount');
+        $has_tax_amount = $this->local_ledger_item_column_exists('local_ledger_item_tax_amount');
 
         $optional_selects = [];
         if ($has_price_after_discount) {
@@ -79,6 +81,8 @@ class TGS_Viettel_Invoice_Flow_Service
         $optional_selects[] = $has_global_product_name_id ? 'i.global_product_name_id' : '0 AS global_product_name_id';
         $optional_selects[] = $has_local_product_sku ? 'i.local_product_sku' : "'' AS local_product_sku";
         $optional_selects[] = $has_tax_percent ? 'i.local_ledger_item_tax_percent' : '8.0 AS local_ledger_item_tax_percent';
+        $optional_selects[] = $has_discount_amount ? 'i.local_ledger_item_discount_amount' : '0 AS local_ledger_item_discount_amount';
+        $optional_selects[] = $has_tax_amount ? 'i.local_ledger_item_tax_amount' : '0 AS local_ledger_item_tax_amount';
         $optional_select_sql = empty($optional_selects) ? '' : ', ' . implode(', ', $optional_selects);
 
         $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
@@ -164,10 +168,15 @@ class TGS_Viettel_Invoice_Flow_Service
                 'unit_name' => (string) ($item['local_product_unit'] ?? ''),
                 'quantity' => $quantity,
                 'unit_price_after_discount' => $unit_price,
+                'discount_value' => floatval($item['local_ledger_item_discount'] ?? 0),
+                'discount_type' => (string) ($item['local_ledger_item_discount_type'] ?? ''),
+                'discount_amount' => floatval($item['local_ledger_item_discount_amount'] ?? 0),
                 'line_total' => $quantity * $unit_price,
+                'line_total_without_tax' => $this->resolve_item_line_total_without_tax($item, $quantity, $unit_price),
                 'tax_percent' => isset($item['local_ledger_item_tax_percent']) && $item['local_ledger_item_tax_percent'] !== null && $item['local_ledger_item_tax_percent'] !== ''
                     ? floatval($item['local_ledger_item_tax_percent'])
                     : 8.0,
+                'tax_amount' => $this->resolve_item_tax_amount($item, $quantity, $unit_price),
             ];
         }
 
@@ -341,8 +350,12 @@ class TGS_Viettel_Invoice_Flow_Service
                 $unit_price = 0.0;
             }
 
-            $without_tax = round($quantity * $unit_price);
-            $tax_amount  = round($without_tax * $tax_percent / 100);
+            $without_tax = isset($item['line_total_without_tax'])
+                ? max(0, (int) round(floatval($item['line_total_without_tax'])))
+                : (int) round($quantity * $unit_price);
+            $tax_amount = isset($item['tax_amount']) && $item['tax_amount'] !== null && $item['tax_amount'] !== ''
+                ? max(0, (int) round(floatval($item['tax_amount'])))
+                : (int) round($without_tax * $tax_percent / 100);
             $with_tax    = $without_tax + $tax_amount;
 
             $sum_without_tax += $without_tax;
@@ -360,6 +373,7 @@ class TGS_Viettel_Invoice_Flow_Service
             $tax_breakdown_map[$key]['taxableAmount'] += $without_tax;
             $tax_breakdown_map[$key]['taxAmount'] += $tax_amount;
 
+            $item_note = $this->build_invoice_item_note($item);
             $item_info[] = [
                 'lineNumber' => $line_number,
                 'selection' => 1,
@@ -377,6 +391,7 @@ class TGS_Viettel_Invoice_Flow_Service
                 'isIncreaseItem' => null,
             ];
 
+            $item_info[count($item_info) - 1]['itemNote'] = $item_note !== '' ? $item_note : null;
             $line_number++;
         }
 
@@ -503,6 +518,62 @@ class TGS_Viettel_Invoice_Flow_Service
         }
 
         return '';
+    }
+
+    private function resolve_item_line_total_without_tax(array $item, $quantity, $unit_price)
+    {
+        $quantity = max(0.0, floatval($quantity));
+        $unit_price = max(0.0, floatval($unit_price));
+
+        if ($quantity <= 0) {
+            return 0;
+        }
+
+        $raw_subtotal = floatval($item['price'] ?? 0) * $quantity;
+        $discount_amount = floatval($item['local_ledger_item_discount_amount'] ?? 0);
+        if ($discount_amount > 0) {
+            return max(0, round($raw_subtotal - $discount_amount));
+        }
+
+        return round($quantity * $unit_price);
+    }
+
+    private function resolve_item_tax_amount(array $item, $quantity, $unit_price)
+    {
+        if (isset($item['local_ledger_item_tax_amount']) && $item['local_ledger_item_tax_amount'] !== null && $item['local_ledger_item_tax_amount'] !== '') {
+            return max(0, round(floatval($item['local_ledger_item_tax_amount'])));
+        }
+
+        $line_total_without_tax = $this->resolve_item_line_total_without_tax($item, $quantity, $unit_price);
+        $tax_percent = isset($item['local_ledger_item_tax_percent']) && $item['local_ledger_item_tax_percent'] !== null && $item['local_ledger_item_tax_percent'] !== ''
+            ? floatval($item['local_ledger_item_tax_percent'])
+            : 8.0;
+
+        return max(0, round($line_total_without_tax * $tax_percent / 100));
+    }
+
+    private function build_invoice_item_note(array $item)
+    {
+        $notes = [];
+
+        if (!empty($item['is_gift'])) {
+            $notes[] = 'Hang tang khuyen mai';
+        }
+
+        $discount_amount = max(0, (int) round(floatval($item['discount_amount'] ?? 0)));
+        $discount_value = floatval($item['discount_value'] ?? 0);
+        $discount_type = (string) ($item['discount_type'] ?? '');
+
+        if ($discount_amount > 0 || $discount_value > 0) {
+            if ($discount_type === 'percent' && $discount_value > 0) {
+                $discount_percent = rtrim(rtrim(number_format($discount_value, 2, '.', ''), '0'), '.');
+                $notes[] = 'Chiet khau ' . $discount_percent . '%' . ($discount_amount > 0 ? ' (' . number_format($discount_amount, 0, ',', '.') . 'd)' : '');
+            } elseif ($discount_amount > 0) {
+                $notes[] = 'Chiet khau ' . number_format($discount_amount, 0, ',', '.') . 'd';
+            }
+        }
+
+        return implode(' | ', $notes);
     }
 
     private function find_under24_skus(array $skus)

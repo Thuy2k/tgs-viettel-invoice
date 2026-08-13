@@ -53,6 +53,9 @@ class TGS_Viettel_Invoice_Plugin
         add_filter('tgs_shop_dashboard_routes', [$this, 'register_routes']);
         add_action('tgs_shop_system_menu', [$this, 'render_system_menu'], 25, 1);
         add_action('admin_enqueue_scripts', [$this, 'enqueue_assets']);
+        add_action('admin_notices', [$this, 'render_schema_health_notice']);
+        add_action('init', [$this, 'ensure_cleanup_schedule']);
+        add_action('tgs_viettel_invoice_cleanup_temp_files', [$this, 'scheduled_cleanup_temp_files']);
 
         add_action('wp_ajax_tgs_viettel_invoice_save_common_settings', [$this, 'ajax_save_common_settings']);
         add_action('wp_ajax_tgs_viettel_invoice_save_shop_settings', [$this, 'ajax_save_shop_settings']);
@@ -63,22 +66,14 @@ class TGS_Viettel_Invoice_Plugin
         add_action('wp_ajax_tgs_viettel_invoice_retry_invoice', [$this, 'ajax_retry_invoice']);
 
         add_action('wp_ajax_tgs_viettel_send_from_sale', [$this, 'ajax_send_from_sale']);
-        add_action('wp_ajax_nopriv_tgs_viettel_send_from_sale', [$this, 'ajax_send_from_sale']);
         add_action('wp_ajax_tgs_viettel_pos_retry_invoice', [$this, 'ajax_pos_retry_invoice']);
-        add_action('wp_ajax_nopriv_tgs_viettel_pos_retry_invoice', [$this, 'ajax_pos_retry_invoice']);
         add_action('wp_ajax_tgs_viettel_pos_send_invoice_email', [$this, 'ajax_pos_send_invoice_email']);
-        add_action('wp_ajax_nopriv_tgs_viettel_pos_send_invoice_email', [$this, 'ajax_pos_send_invoice_email']);
         add_action('wp_ajax_tgs_viettel_pos_preview_invoice_pdf', [$this, 'ajax_pos_preview_invoice_pdf']);
-        add_action('wp_ajax_nopriv_tgs_viettel_pos_preview_invoice_pdf', [$this, 'ajax_pos_preview_invoice_pdf']);
         add_action('wp_ajax_tgs_viettel_get_sale_debug_log', [$this, 'ajax_get_sale_debug_log']);
         add_action('wp_ajax_tgs_viettel_pos_list_statuses', [$this, 'ajax_pos_list_statuses']);
-        add_action('wp_ajax_nopriv_tgs_viettel_pos_list_statuses', [$this, 'ajax_pos_list_statuses']);
         add_action('wp_ajax_tgs_viettel_pos_debug_statuses_context', [$this, 'ajax_pos_debug_statuses_context']);
-        add_action('wp_ajax_nopriv_tgs_viettel_pos_debug_statuses_context', [$this, 'ajax_pos_debug_statuses_context']);
         add_action('wp_ajax_tgs_viettel_pos_get_items_for_review', [$this, 'ajax_pos_get_items_for_review']);
-        add_action('wp_ajax_nopriv_tgs_viettel_pos_get_items_for_review', [$this, 'ajax_pos_get_items_for_review']);
         add_action('wp_ajax_tgs_viettel_pos_update_danger_flags', [$this, 'ajax_pos_update_danger_flags']);
-        add_action('wp_ajax_nopriv_tgs_viettel_pos_update_danger_flags', [$this, 'ajax_pos_update_danger_flags']);
 
 
         /*
@@ -111,10 +106,14 @@ class TGS_Viettel_Invoice_Plugin
 
     private function current_user_can_use_pos()
     {
-        if (!class_exists('TGS_POS_Permission')) {
-            $permission_file = WP_PLUGIN_DIR . '/tgs_pos/includes/class-tgs-pos-permission.php';
-            if (file_exists($permission_file)) {
-                require_once $permission_file;
+        $this->load_pos_permission_classes();
+
+        if (class_exists('TGS_POS_Site_Permission')) {
+            $manager = TGS_POS_Site_Permission::get_instance();
+            $blog_id = get_current_blog_id();
+            if ($manager && method_exists($manager, 'is_permission_enabled') && $manager->is_permission_enabled($blog_id)) {
+                return method_exists($manager, 'user_can_access_pos_site')
+                    && (bool) $manager->user_can_access_pos_site(get_current_user_id(), $blog_id);
             }
         }
 
@@ -145,19 +144,76 @@ class TGS_Viettel_Invoice_Plugin
         return current_user_can('read') || current_user_can('edit_posts') || current_user_can('manage_options');
     }
 
-    private function bootstrap_requested_blog_context()
+    private function load_pos_permission_classes()
     {
-        if (!is_multisite()) {
-            return;
+        if (!class_exists('TGS_POS_Site_Permission')) {
+            $site_permission_file = WP_PLUGIN_DIR . '/tgs_pos/includes/class-tgs-pos-site-permission.php';
+            if (file_exists($site_permission_file)) {
+                require_once $site_permission_file;
+            }
         }
 
-        $requested_blog_id = intval($_REQUEST['blog_id'] ?? 0);
-        if ($requested_blog_id <= 0 || $requested_blog_id === get_current_blog_id()) {
-            return;
+        if (!class_exists('TGS_POS_Permission')) {
+            $permission_file = WP_PLUGIN_DIR . '/tgs_pos/includes/class-tgs-pos-permission.php';
+            if (file_exists($permission_file)) {
+                require_once $permission_file;
+            }
+        }
+    }
+
+    private function current_user_can_access_pos_blog($blog_id)
+    {
+        $blog_id = intval($blog_id);
+        $user_id = get_current_user_id();
+        if ($blog_id <= 0 || $user_id <= 0 || !get_blog_details($blog_id)) {
+            return false;
         }
 
-        if (get_blog_details($requested_blog_id)) {
-            switch_to_blog($requested_blog_id);
+        $this->load_pos_permission_classes();
+
+        if (class_exists('TGS_POS_Site_Permission')) {
+            $manager = TGS_POS_Site_Permission::get_instance();
+            if ($manager && method_exists($manager, 'is_permission_enabled') && $manager->is_permission_enabled($blog_id)) {
+                return method_exists($manager, 'user_can_access_pos_site')
+                    && (bool) $manager->user_can_access_pos_site($user_id, $blog_id);
+            }
+        }
+
+        // Khi site chưa bật ma trận quyền POS, vẫn phải là thành viên site đích.
+        return is_user_member_of_blog($user_id, $blog_id);
+    }
+
+    private function guard_pos_ajax($debug_only = false)
+    {
+        if (!is_user_logged_in()) {
+            wp_send_json_error(['message' => 'Bạn cần đăng nhập để sử dụng chức năng này.'], 403);
+        }
+
+        $requested_blog_id = intval($_REQUEST['blog_id'] ?? get_current_blog_id());
+        if (is_multisite() && !$this->current_user_can_access_pos_blog($requested_blog_id)) {
+            wp_send_json_error(['message' => 'Bạn không có quyền truy cập POS của site được yêu cầu.'], 403);
+        }
+
+        if (is_multisite() && $requested_blog_id !== get_current_blog_id()) {
+            if (!switch_to_blog($requested_blog_id)) {
+                wp_send_json_error(['message' => 'Không thể chuyển sang site được yêu cầu.'], 400);
+            }
+        }
+
+        $nonce = sanitize_text_field(wp_unslash($_REQUEST['nonce'] ?? ''));
+        if (
+            $nonce === ''
+            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
+        ) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+        }
+
+        if (!$this->current_user_can_use_pos()) {
+            wp_send_json_error(['message' => 'Bạn không có quyền sử dụng POS tại site này.'], 403);
+        }
+
+        if ($debug_only && (!(defined('WP_DEBUG') && WP_DEBUG) || !current_user_can('manage_options'))) {
+            wp_send_json_error(['message' => 'Chức năng debug không được phép trong môi trường hiện tại.'], 403);
         }
     }
 
@@ -294,7 +350,9 @@ class TGS_Viettel_Invoice_Plugin
             'default_payment_method' => 'TM/CK',
             'verify_ssl' => 1,
             'auto_enabled' => 0,
+            'auto_issue_confirmed' => 0,
             'auto_mode' => 'issue',
+            'log_retention_days' => 0,
         ];
     }
 
@@ -304,7 +362,7 @@ class TGS_Viettel_Invoice_Plugin
             'api_base_url', 'auth_mode', 'username', 'password',
             'access_token', 'verify_ssl',
             'default_template_code', 'default_invoice_series', 'default_payment_method',
-            'auto_enabled', 'auto_mode',
+            'auto_enabled', 'auto_issue_confirmed', 'auto_mode', 'log_retention_days',
         ];
     }
 
@@ -325,7 +383,127 @@ class TGS_Viettel_Invoice_Plugin
         if (!is_array($common)) {
             $common = [];
         }
+        foreach (['password', 'access_token'] as $secret_key) {
+            if (isset($common[$secret_key])) {
+                $common[$secret_key] = self::decrypt_secret((string) $common[$secret_key]);
+            }
+        }
         return $common;
+    }
+
+    public function render_schema_health_notice()
+    {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        $errors = $this->get_schema_health_errors();
+        if (empty($errors)) {
+            return;
+        }
+
+        echo '<div class="notice notice-error"><p><strong>TGS Viettel Invoice chưa sẵn sàng:</strong> '
+            . esc_html(implode(' | ', $errors))
+            . '</p></div>';
+    }
+
+    private function get_schema_health_errors()
+    {
+        global $wpdb;
+        $errors = [];
+        $required_constants = [
+            'TGS_TABLE_LOCAL_LEDGER',
+            'TGS_TABLE_LOCAL_LEDGER_ITEM',
+            'TGS_TABLE_LOCAL_VIETTEL_INVOICE',
+            'TGS_TABLE_LOCAL_VIETTEL_INVOICE_LOG',
+        ];
+        foreach ($required_constants as $constant) {
+            if (!defined($constant)) {
+                $errors[] = 'Thiếu constant ' . $constant;
+            }
+        }
+
+        if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
+            return $errors;
+        }
+
+        $table = constant('TGS_TABLE_LOCAL_VIETTEL_INVOICE');
+        if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table)) !== $table) {
+            $errors[] = 'Thiếu bảng ' . $table;
+            return $errors;
+        }
+
+        $safe_table = str_replace('`', '', $table);
+        $columns = $wpdb->get_col('SHOW COLUMNS FROM `' . $safe_table . '`', 0);
+        $required_columns = [
+            'blog_id', 'sale_ledger_id', 'request_mode', 'invoice_state', 'issue_status',
+            'send_cqt_status', 'issue_transaction_uuid', 'viettel_invoice_no', 'updated_at',
+        ];
+        $missing_columns = array_values(array_diff($required_columns, is_array($columns) ? $columns : []));
+        if (!empty($missing_columns)) {
+            $errors[] = 'Bảng hóa đơn thiếu cột: ' . implode(', ', $missing_columns);
+        }
+
+        return $errors;
+    }
+
+    private static function secret_encryption_key()
+    {
+        $material = (defined('AUTH_KEY') ? AUTH_KEY : '') . '|' . (defined('SECURE_AUTH_KEY') ? SECURE_AUTH_KEY : '');
+        return hash('sha256', $material, true);
+    }
+
+    private static function encrypt_secret($value)
+    {
+        $value = (string) $value;
+        if ($value === '' || strpos($value, 'tgsenc:v1:') === 0 || !function_exists('openssl_encrypt')) {
+            return $value;
+        }
+
+        try {
+            $iv = random_bytes(12);
+        } catch (Exception $e) {
+            return $value;
+        }
+        $tag = '';
+        $ciphertext = openssl_encrypt($value, 'aes-256-gcm', self::secret_encryption_key(), OPENSSL_RAW_DATA, $iv, $tag);
+        if ($ciphertext === false) {
+            return $value;
+        }
+
+        return 'tgsenc:v1:' . base64_encode($iv . $tag . $ciphertext);
+    }
+
+    private static function decrypt_secret($value)
+    {
+        $value = (string) $value;
+        if (strpos($value, 'tgsenc:v1:') !== 0 || !function_exists('openssl_decrypt')) {
+            return $value;
+        }
+
+        $packed = base64_decode(substr($value, 10), true);
+        if ($packed === false || strlen($packed) < 29) {
+            return '';
+        }
+        $iv = substr($packed, 0, 12);
+        $tag = substr($packed, 12, 16);
+        $ciphertext = substr($packed, 28);
+        $plaintext = openssl_decrypt($ciphertext, 'aes-256-gcm', self::secret_encryption_key(), OPENSSL_RAW_DATA, $iv, $tag);
+
+        return $plaintext === false ? '' : $plaintext;
+    }
+
+    private static function protect_common_settings_for_storage($settings)
+    {
+        if (!is_array($settings)) {
+            return [];
+        }
+        foreach (['password', 'access_token'] as $secret_key) {
+            if (array_key_exists($secret_key, $settings)) {
+                $settings[$secret_key] = self::encrypt_secret($settings[$secret_key]);
+            }
+        }
+        return $settings;
     }
 
     public static function get_shop_settings()
@@ -361,7 +539,9 @@ class TGS_Viettel_Invoice_Plugin
             'default_invoice_series' => sanitize_text_field($data['default_invoice_series'] ?? ''),
             'default_payment_method' => sanitize_text_field($data['default_payment_method'] ?? ''),
             'auto_enabled' => !empty($data['auto_enabled']) ? 1 : 0,
+            'auto_issue_confirmed' => !empty($data['auto_issue_confirmed']) ? 1 : 0,
             'auto_mode' => in_array(($data['auto_mode'] ?? ''), ['draft', 'issue'], true) ? $data['auto_mode'] : 'issue',
+            'log_retention_days' => min(3650, max(0, intval($data['log_retention_days'] ?? 0))),
         ];
 
         if ($sanitized['password'] === '********') {
@@ -406,10 +586,14 @@ class TGS_Viettel_Invoice_Plugin
 
         $settings = $this->sanitize_common_settings($raw);
 
+        if (!empty($settings['auto_enabled']) && $settings['auto_mode'] === 'issue' && empty($settings['auto_issue_confirmed'])) {
+            wp_send_json_error(['message' => 'Bạn phải xác nhận rõ rủi ro trước khi bật tự động phát hành hóa đơn.'], 400);
+        }
+
         if (is_multisite()) {
-            update_site_option(self::OPTION_COMMON_SETTINGS, $settings);
+            update_site_option(self::OPTION_COMMON_SETTINGS, self::protect_common_settings_for_storage($settings));
         } else {
-            update_option(self::OPTION_COMMON_SETTINGS, $settings, false);
+            update_option(self::OPTION_COMMON_SETTINGS, self::protect_common_settings_for_storage($settings), false);
         }
 
         wp_send_json_success(['message' => 'Đã lưu cấu hình chung.']);
@@ -494,9 +678,9 @@ class TGS_Viettel_Invoice_Plugin
             $common_payload = isset($decoded['common']) && is_array($decoded['common']) ? $decoded['common'] : $decoded;
             $common_settings = $this->sanitize_common_settings($common_payload);
             if (is_multisite()) {
-                update_site_option(self::OPTION_COMMON_SETTINGS, $common_settings);
+                update_site_option(self::OPTION_COMMON_SETTINGS, self::protect_common_settings_for_storage($common_settings));
             } else {
-                update_option(self::OPTION_COMMON_SETTINGS, $common_settings, false);
+                update_option(self::OPTION_COMMON_SETTINGS, self::protect_common_settings_for_storage($common_settings), false);
             }
             $imported[] = 'common';
         }
@@ -525,6 +709,8 @@ class TGS_Viettel_Invoice_Plugin
 
     public function run_migration()
     {
+        $this->migrate_secret_storage();
+
         // Use site_option on multisite, regular option on single site
         $flag_key = 'tgs_viettel_invoice_migration_done';
         $migrated = is_multisite() ? get_site_option($flag_key, false) : get_option($flag_key, false);
@@ -547,7 +733,7 @@ class TGS_Viettel_Invoice_Plugin
                         }
                     }
                     if (!empty($extracted)) {
-                        update_option(self::OPTION_COMMON_SETTINGS, $extracted, false);
+                        update_option(self::OPTION_COMMON_SETTINGS, self::protect_common_settings_for_storage($extracted), false);
                         update_option(self::OPTION_SETTINGS, $all_settings, false);
                     }
                 }
@@ -595,12 +781,33 @@ class TGS_Viettel_Invoice_Plugin
                     }
                 }
                 if (!empty($extracted)) {
-                    update_site_option(self::OPTION_COMMON_SETTINGS, $extracted);
+                    update_site_option(self::OPTION_COMMON_SETTINGS, self::protect_common_settings_for_storage($extracted));
                 }
             }
         }
 
         update_site_option($flag_key, true);
+    }
+
+    private function migrate_secret_storage()
+    {
+        $raw = is_multisite()
+            ? get_site_option(self::OPTION_COMMON_SETTINGS, [])
+            : get_option(self::OPTION_COMMON_SETTINGS, []);
+        if (!is_array($raw) || empty($raw)) {
+            return;
+        }
+
+        $protected = self::protect_common_settings_for_storage($raw);
+        if ($protected === $raw) {
+            return;
+        }
+
+        if (is_multisite()) {
+            update_site_option(self::OPTION_COMMON_SETTINGS, $protected);
+        } else {
+            update_option(self::OPTION_COMMON_SETTINGS, $protected, false);
+        }
     }
 
     public function ajax_send_payload()
@@ -748,17 +955,21 @@ class TGS_Viettel_Invoice_Plugin
             wp_send_json_error(['message' => 'Thiếu dịch vụ xử lý luồng hóa đơn.'], 500);
         }
 
-        $this->run_auto_issue_cqt_flow([
+        $flow_result = $this->run_auto_issue_cqt_flow([
             'sale_ledger_id' => intval($row['sale_ledger_id']),
             'sale_code' => sanitize_text_field($row['local_ledger_code'] ?? ''),
             'employee_id' => get_current_user_id(),
         ], $settings);
 
-        wp_send_json_success([
-            'message' => 'Đã nhận yêu cầu gửi lại hóa đơn theo mã đơn bán.',
+        if (empty($flow_result['success'])) {
+            wp_send_json_error($flow_result, ($flow_result['step'] ?? '') === 'idempotency' ? 409 : 400);
+        }
+
+        wp_send_json_success(array_merge($flow_result, [
+            'message' => $flow_result['message'] ?? 'Đã gửi lại hóa đơn theo mã đơn bán.',
             'invoice_id' => $invoice_id,
             'sale_ledger_id' => intval($row['sale_ledger_id']),
-        ]);
+        ]));
     }
 
     /**
@@ -766,21 +977,7 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_get_sale_debug_log()
     {
-        $this->bootstrap_requested_blog_context();
-        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
-        if (
-            empty($nonce)
-            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
-        ) {
-            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
-            return;
-        }
-
-        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
-        if (!is_user_logged_in()) {
-            wp_send_json_error(['message' => 'Bạn cần đăng nhập để xem nhật ký.'], 403);
-            return;
-        }
+        $this->guard_pos_ajax(true);
 
         if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE') || !defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE_LOG')) {
             wp_send_json_error(['message' => 'Chưa tìm thấy bảng log Viettel Invoice.'], 500);
@@ -894,21 +1091,7 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_pos_list_statuses()
     {
-        $this->bootstrap_requested_blog_context();
-        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
-        if (
-            empty($nonce)
-            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
-        ) {
-            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
-            return;
-        }
-
-        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
-        if (!is_user_logged_in()) {
-            wp_send_json_error(['message' => 'Bạn cần đăng nhập để xem danh sách.'], 403);
-            return;
-        }
+        $this->guard_pos_ajax();
 
         if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE') || !defined('TGS_TABLE_LOCAL_LEDGER')) {
             wp_send_json_error(['message' => 'Chưa tìm thấy bảng dữ liệu cần thiết.'], 500);
@@ -1079,19 +1262,7 @@ class TGS_Viettel_Invoice_Plugin
 
     public function ajax_pos_debug_statuses_context()
     {
-        $this->bootstrap_requested_blog_context();
-
-        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
-        if (
-            empty($nonce)
-            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
-        ) {
-            wp_send_json_error([
-                'message' => 'Nonce không hợp lệ.',
-                'debug' => $this->get_pos_statuses_debug_context(),
-            ], 403);
-            return;
-        }
+        $this->guard_pos_ajax(true);
 
         wp_send_json_success([
             'debug' => $this->get_pos_statuses_debug_context(),
@@ -1104,14 +1275,8 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_pos_get_items_for_review()
     {
-        $this->bootstrap_requested_blog_context();
+        $this->guard_pos_ajax();
         global $wpdb;
-
-        $nonce = sanitize_text_field($_REQUEST['nonce'] ?? '');
-        if (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce')) {
-            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
-            return;
-        }
 
         $sale_ledger_id = intval($_REQUEST['sale_ledger_id'] ?? 0);
         if ($sale_ledger_id <= 0) {
@@ -1182,7 +1347,7 @@ class TGS_Viettel_Invoice_Plugin
         $global_id_sql = $has_global_product_name_id ? ', i.global_product_name_id' : ', 0 AS global_product_name_id';
         $sku_sql = $has_local_product_sku ? ', i.local_product_sku' : ", '' AS local_product_sku";
         $has_tax_percent = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_tax_percent');
-        $tax_percent_sql = $has_tax_percent ? ', i.local_ledger_item_tax_percent' : ', 0 AS local_ledger_item_tax_percent';
+        $tax_percent_sql = $has_tax_percent ? ', i.local_ledger_item_tax_percent' : ', NULL AS local_ledger_item_tax_percent';
         $has_discount_amount = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_discount_amount');
         $discount_amount_sql = $has_discount_amount ? ', i.local_ledger_item_discount_amount' : ', 0 AS local_ledger_item_discount_amount';
         $has_tax_amount = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_tax_amount');
@@ -1192,9 +1357,9 @@ class TGS_Viettel_Invoice_Plugin
         $rows = $wpdb->get_results(
             $wpdb->prepare(
                 'SELECT i.local_ledger_item_id, i.local_product_name_id,
-                        i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price,
-                        i.local_ledger_item_discount_amount'
-                        . $tax_percent_sql . $danger_col_sql . $pad_col_sql . $global_id_sql . $sku_sql . '
+                        i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price'
+                        . $discount_amount_sql . $tax_percent_sql . $tax_amount_sql
+                        . $danger_col_sql . $pad_col_sql . $global_id_sql . $sku_sql . '
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  WHERE i.local_ledger_item_id IN (' . $placeholders . ')
                  ORDER BY i.local_ledger_item_id ASC',
@@ -1258,8 +1423,11 @@ class TGS_Viettel_Invoice_Plugin
                 ? TGS_Money::discount_percent_of($row, $row['local_ledger_item_discount'] ?? 0)
                 : floatval($row['local_ledger_item_discount'] ?? 0);
             $disc_type = $disc_value > 0 ? 'percent' : '';
+            $disc_amount = floatval($row['local_ledger_item_discount_amount'] ?? 0);
             $price_after_disc = $has_pad_col ? floatval($row['local_ledger_item_price_after_discount'] ?? $row['price']) : floatval($row['price']);
-            $tax_percent = floatval($row['local_ledger_item_tax_percent'] ?? 0);
+            $tax_percent = array_key_exists('local_ledger_item_tax_percent', $row) && $row['local_ledger_item_tax_percent'] !== null
+                ? floatval($row['local_ledger_item_tax_percent'])
+                : null;
             $tax_amount = floatval($row['local_ledger_item_tax_amount'] ?? 0);
 
             // Phát hiện SKU kết thúc bằng chữ Z (case-insensitive).
@@ -1331,14 +1499,8 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_pos_update_danger_flags()
     {
-        $this->bootstrap_requested_blog_context();
+        $this->guard_pos_ajax();
         global $wpdb;
-
-        $nonce = sanitize_text_field($_REQUEST['nonce'] ?? '');
-        if (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce')) {
-            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
-            return;
-        }
 
         $sale_ledger_id = intval($_REQUEST['sale_ledger_id'] ?? 0);
         if ($sale_ledger_id <= 0) {
@@ -1354,7 +1516,7 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        if (!defined('TGS_TABLE_LOCAL_LEDGER_ITEM')) {
+        if (!defined('TGS_TABLE_LOCAL_LEDGER') || !defined('TGS_TABLE_LOCAL_LEDGER_ITEM')) {
             wp_send_json_error(['message' => 'Thiếu hằng số bảng dữ liệu.']);
             return;
         }
@@ -1364,12 +1526,38 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
+        $sale_item_ids_json = $wpdb->get_var(
+            $wpdb->prepare(
+                'SELECT local_ledger_item_id FROM ' . TGS_TABLE_LOCAL_LEDGER . ' WHERE local_ledger_id = %d LIMIT 1',
+                $sale_ledger_id
+            )
+        );
+        $sale_item_ids = is_string($sale_item_ids_json) ? json_decode($sale_item_ids_json, true) : [];
+        $sale_item_ids = is_array($sale_item_ids) ? array_values(array_unique(array_filter(array_map('intval', $sale_item_ids)))) : [];
+        $allowed_item_ids = array_fill_keys($sale_item_ids, true);
+        $requested_item_ids = [];
+        foreach ($flags as $flag_entry) {
+            $item_id = intval($flag_entry['item_id'] ?? 0);
+            if ($item_id > 0) {
+                $requested_item_ids[$item_id] = true;
+            }
+        }
+
+        $invalid_item_ids = array_values(array_diff(array_keys($requested_item_ids), $sale_item_ids));
+        if (!empty($invalid_item_ids)) {
+            wp_send_json_error([
+                'message' => 'Yêu cầu chứa item không thuộc đơn bán hàng.',
+                'invalid_item_ids' => $invalid_item_ids,
+            ], 400);
+            return;
+        }
+
         $updated = 0;
         foreach ($flags as $flag_entry) {
             $item_id = intval($flag_entry['item_id'] ?? 0);
             $danger  = intval($flag_entry['danger_flag'] ?? 0) === 1 ? 1 : 0;
 
-            if ($item_id <= 0) {
+            if ($item_id <= 0 || !isset($allowed_item_ids[$item_id])) {
                 continue;
             }
 
@@ -1396,21 +1584,7 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_pos_retry_invoice()
     {
-        $this->bootstrap_requested_blog_context();
-        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
-        if (
-            empty($nonce)
-            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
-        ) {
-            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
-            return;
-        }
-
-        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
-        if (!is_user_logged_in()) {
-            wp_send_json_error(['message' => 'Bạn cần đăng nhập để gửi lại hóa đơn.'], 403);
-            return;
-        }
+        $this->guard_pos_ajax();
 
         if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
             wp_send_json_error(['message' => 'Chưa tìm thấy bảng theo dõi hóa đơn Viettel.'], 500);
@@ -1569,7 +1743,7 @@ class TGS_Viettel_Invoice_Plugin
             $customer_override = [];
         }
 
-        $this->run_auto_issue_cqt_flow([
+        $flow_result = $this->run_auto_issue_cqt_flow([
             'sale_ledger_id' => $sale_ledger_id,
             'sale_code' => sanitize_text_field($latest['local_ledger_code'] ?? ''),
             'employee_id' => $created_by,
@@ -1577,11 +1751,16 @@ class TGS_Viettel_Invoice_Plugin
             'customer_override' => $customer_override,
         ], $settings);
 
-        wp_send_json_success([
-            'message' => 'Đã gửi lại theo full flow do hóa đơn chưa phát hành thành công.',
+        if (empty($flow_result['success'])) {
+            wp_send_json_error($flow_result, in_array($flow_result['step'] ?? '', ['idempotency', 'reconcile'], true) ? 409 : 400);
+            return;
+        }
+
+        wp_send_json_success(array_merge($flow_result, [
+            'message' => $flow_result['message'] ?? 'Đã gửi lại theo full flow.',
             'sale_ledger_id' => $sale_ledger_id,
             'mode' => 'full_flow',
-        ]);
+        ]));
     }
 
     /**
@@ -1589,21 +1768,7 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_pos_send_invoice_email()
     {
-        $this->bootstrap_requested_blog_context();
-        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
-        if (
-            empty($nonce)
-            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
-        ) {
-            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
-            return;
-        }
-
-        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
-        if (!is_user_logged_in()) {
-            wp_send_json_error(['message' => 'Bạn cần đăng nhập để gửi email hóa đơn.'], 403);
-            return;
-        }
+        $this->guard_pos_ajax();
 
         if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
             wp_send_json_error(['message' => 'Chưa tìm thấy bảng theo dõi hóa đơn Viettel.'], 500);
@@ -1616,9 +1781,10 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        $to_email = sanitize_email($_POST['to_email'] ?? 'thuy.nguyenvan2000hn@gmail.com');
-        if ($to_email === '') {
-            $to_email = 'thuy.nguyenvan2000hn@gmail.com';
+        $to_email = sanitize_email(wp_unslash($_POST['to_email'] ?? ''));
+        if ($to_email === '' || !is_email($to_email)) {
+            wp_send_json_error(['message' => 'Email người nhận đang trống hoặc không hợp lệ.'], 400);
+            return;
         }
 
         global $wpdb;
@@ -1862,20 +2028,7 @@ class TGS_Viettel_Invoice_Plugin
 
     public function ajax_lookup_customer_by_tax_code()
     {
-        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
-        if (
-            empty($nonce)
-            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
-        ) {
-            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
-            return;
-        }
-
-        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
-        if (!is_user_logged_in()) {
-            wp_send_json_error(['message' => 'Bạn cần đăng nhập để tra cứu khách hàng.'], 403);
-            return;
-        }
+        $this->guard_pos_ajax();
 
         if (!defined('TGS_TABLE_LOCAL_LEDGER_PERSON')) {
             wp_send_json_error(['message' => 'Chưa tìm thấy bảng dữ liệu khách hàng.'], 500);
@@ -1926,21 +2079,7 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_pos_preview_invoice_pdf()
     {
-        $this->bootstrap_requested_blog_context();
-        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
-        if (
-            empty($nonce)
-            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
-        ) {
-            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
-            return;
-        }
-
-        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
-        if (!is_user_logged_in()) {
-            wp_send_json_error(['message' => 'Bạn cần đăng nhập để xem PDF hóa đơn.'], 403);
-            return;
-        }
+        $this->guard_pos_ajax();
 
         if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
             wp_send_json_error(['message' => 'Chưa tìm thấy bảng theo dõi hóa đơn Viettel.'], 500);
@@ -2149,12 +2288,7 @@ class TGS_Viettel_Invoice_Plugin
 
     private function create_invoice_email_attachment_temp_file($file_name, $binary_content)
     {
-        $uploads = wp_upload_dir();
-        if (!empty($uploads['error'])) {
-            return '';
-        }
-
-        $dir = trailingslashit($uploads['basedir']) . 'tgs-invoice-email-attachments';
+        $dir = trailingslashit(get_temp_dir()) . 'tgs-invoice-email-attachments';
         if (!wp_mkdir_p($dir)) {
             return '';
         }
@@ -2175,12 +2309,7 @@ class TGS_Viettel_Invoice_Plugin
 
     private function cleanup_old_invoice_email_attachments($max_age_days = 2)
     {
-        $uploads = wp_upload_dir();
-        if (!empty($uploads['error'])) {
-            return;
-        }
-
-        $dir = trailingslashit($uploads['basedir']) . 'tgs-invoice-email-attachments';
+        $dir = trailingslashit(get_temp_dir()) . 'tgs-invoice-email-attachments';
         if (!is_dir($dir)) {
             return;
         }
@@ -2200,6 +2329,38 @@ class TGS_Viettel_Invoice_Plugin
                 @unlink($file);
             }
         }
+    }
+
+    public function ensure_cleanup_schedule()
+    {
+        if (!wp_next_scheduled('tgs_viettel_invoice_cleanup_temp_files')) {
+            wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'tgs_viettel_invoice_cleanup_temp_files');
+        }
+    }
+
+    public function scheduled_cleanup_temp_files()
+    {
+        $this->cleanup_old_invoice_email_attachments(2);
+
+        $settings = self::get_settings();
+        $retention_days = intval($settings['log_retention_days'] ?? 0);
+        if ($retention_days <= 0 || !defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE_LOG')) {
+            return;
+        }
+
+        global $wpdb;
+        $cutoff = date('Y-m-d H:i:s', current_time('timestamp') - ($retention_days * DAY_IN_SECONDS));
+        $wpdb->query(
+            $wpdb->prepare(
+                'DELETE FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE_LOG . ' WHERE created_at < %s',
+                $cutoff
+            )
+        );
+    }
+
+    public static function deactivate()
+    {
+        wp_clear_scheduled_hook('tgs_viettel_invoice_cleanup_temp_files');
     }
 
     private function submit_invoice_payload($payload, $mode, $context = [])
@@ -2269,9 +2430,17 @@ class TGS_Viettel_Invoice_Plugin
         $response_text = '';
         $response_data = null;
         $error_message = '';
+        $public_error_message = '';
+        $error_type = '';
+        $outcome_ambiguous = false;
 
         if (is_wp_error($response)) {
             $error_message = $response->get_error_message();
+            $error_type = 'transport';
+            $outcome_ambiguous = ($mode === 'issue');
+            $public_error_message = ($mode === 'issue')
+                ? 'Không nhận được phản hồi từ Viettel khi phát hành hóa đơn. Vui lòng báo quản trị viên và chưa gửi lại để tránh trùng hóa đơn.'
+                : 'Không kết nối được với Viettel. Vui lòng báo quản trị viên kiểm tra.';
         } else {
             $http_code = (int) wp_remote_retrieve_response_code($response);
             $response_text = (string) wp_remote_retrieve_body($response);
@@ -2280,6 +2449,19 @@ class TGS_Viettel_Invoice_Plugin
 
             if ($http_code < 200 || $http_code >= 300) {
                 $error_message = 'HTTP ' . $http_code;
+                $error_type = 'http';
+                $outcome_ambiguous = ($mode === 'issue' && $http_code >= 500);
+            } elseif (!is_array($decoded)) {
+                $error_message = 'Response không phải JSON hợp lệ.';
+                $error_type = 'parse';
+                $outcome_ambiguous = ($mode === 'issue');
+            } else {
+                $response_validation = $this->validate_viettel_response($mode, $decoded);
+                if (empty($response_validation['success'])) {
+                    $error_message = sanitize_text_field($response_validation['message'] ?? 'Response Viettel không hợp lệ.');
+                    $error_type = sanitize_key($response_validation['error_type'] ?? 'business');
+                    $outcome_ambiguous = ($mode === 'issue' && !empty($response_validation['ambiguous']));
+                }
             }
         }
 
@@ -2321,10 +2503,13 @@ class TGS_Viettel_Invoice_Plugin
         if (!empty($error_message)) {
             return [
                 'success' => false,
-                'message' => 'Gửi API thất bại: ' . $error_message,
+                // Chi tiết cURL vẫn nằm trong bảng log; không đưa lên giao diện kế toán.
+                'message' => $public_error_message !== '' ? $public_error_message : 'Gửi API thất bại: ' . $error_message,
                 'invoice_record_id' => $invoice_id,
                 'http_code' => $http_code,
                 'response_text' => $response_text,
+                'error_type' => $error_type,
+                'outcome_ambiguous' => $outcome_ambiguous,
             ];
         }
 
@@ -2337,6 +2522,70 @@ class TGS_Viettel_Invoice_Plugin
             'http_code' => $http_code,
             'response' => $response_data ?: $response_text,
         ];
+    }
+
+    private function validate_viettel_response($mode, $response_data)
+    {
+        if (!is_array($response_data) || empty($response_data)) {
+            return [
+                'success' => false,
+                'error_type' => 'parse',
+                'ambiguous' => true,
+                'message' => 'Viettel trả response JSON rỗng.',
+            ];
+        }
+
+        $error_code = $this->deep_pick($response_data, [
+            'errorCode', 'error_code', 'result.errorCode', 'data.errorCode',
+        ]);
+        if ($error_code !== '' && !in_array(strtoupper($error_code), ['0', '200', 'SUCCESS', 'OK'], true)) {
+            return [
+                'success' => false,
+                'error_type' => 'business',
+                'ambiguous' => false,
+                'message' => 'Viettel trả lỗi nghiệp vụ: ' . $error_code,
+            ];
+        }
+
+        if (array_key_exists('success', $response_data) && !$response_data['success']) {
+            return [
+                'success' => false,
+                'error_type' => 'business',
+                'ambiguous' => false,
+                'message' => sanitize_text_field($response_data['message'] ?? $response_data['description'] ?? 'Viettel từ chối yêu cầu.'),
+            ];
+        }
+
+        if ($mode === 'issue') {
+            $transaction_uuid = $this->extract_transaction_uuid($response_data);
+            $invoice_no = $this->extract_invoice_no_from_issue_payload($response_data);
+            if ($transaction_uuid === '' && $invoice_no === '') {
+                return [
+                    'success' => false,
+                    'error_type' => 'schema',
+                    'ambiguous' => true,
+                    'message' => 'Response phát hành thiếu cả transactionUuid và invoiceNo.',
+                ];
+            }
+            return ['success' => true];
+        }
+
+        $positive_signal = !empty($response_data['success'])
+            || in_array(strtolower((string) ($response_data['status'] ?? '')), ['success', 'ok', 'done', '1'], true)
+            || (isset($response_data['code']) && in_array(strtoupper((string) $response_data['code']), ['0', '200', 'SUCCESS', 'OK'], true))
+            || !empty($response_data['result'])
+            || !empty($response_data['data']);
+
+        if (!$positive_signal) {
+            return [
+                'success' => false,
+                'error_type' => 'schema',
+                'ambiguous' => false,
+                'message' => 'Response Viettel thiếu dấu hiệu nghiệp vụ thành công.',
+            ];
+        }
+
+        return ['success' => true];
     }
 
     private function validate_before_send($settings, $payload, $mode = 'draft')
@@ -2639,8 +2888,8 @@ class TGS_Viettel_Invoice_Plugin
                 'transaction_uuid' => sanitize_text_field($data['transaction_uuid'] ?? ''),
                 'endpoint' => esc_url_raw($data['endpoint'] ?? ''),
                 'request_headers' => (string) ($data['request_headers'] ?? ''),
-                'request_payload' => (string) ($data['request_payload'] ?? ''),
-                'response_payload' => (string) ($data['response_payload'] ?? ''),
+                'request_payload' => $this->redact_log_payload($data['request_payload'] ?? ''),
+                'response_payload' => $this->redact_log_payload($data['response_payload'] ?? ''),
                 'error_message' => (string) ($data['error_message'] ?? ''),
                 'http_code' => intval($data['http_code'] ?? 0),
                 'created_by' => intval($data['created_by'] ?? 0),
@@ -2648,6 +2897,44 @@ class TGS_Viettel_Invoice_Plugin
             ],
             ['%d', '%d', '%d', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%s']
         );
+    }
+
+    private function redact_log_payload($payload)
+    {
+        if (is_string($payload)) {
+            $decoded = json_decode($payload, true);
+            if (!is_array($decoded)) {
+                return (string) $payload;
+            }
+            $payload = $decoded;
+        }
+
+        if (!is_array($payload)) {
+            return '';
+        }
+
+        $sensitive_keys = [
+            'password', 'access_token', 'authorization', 'buyername', 'buyerlegalname',
+            'buyeraddressline', 'buyerphonenumber', 'buyeremail', 'buyertaxcode',
+            'customer_name', 'customer_company_name', 'customer_address', 'customer_phone',
+            'customer_email', 'customer_tax_code', 'to_email',
+        ];
+        $redact = static function ($value) use (&$redact, $sensitive_keys) {
+            if (!is_array($value)) {
+                return $value;
+            }
+            foreach ($value as $key => $child) {
+                $normalized_key = strtolower((string) $key);
+                if (in_array($normalized_key, $sensitive_keys, true)) {
+                    $value[$key] = '[REDACTED]';
+                } else {
+                    $value[$key] = $redact($child);
+                }
+            }
+            return $value;
+        };
+
+        return wp_json_encode($redact($payload), JSON_UNESCAPED_UNICODE);
     }
 
     private function get_recent_invoices($limit = 20)
@@ -2696,21 +2983,7 @@ class TGS_Viettel_Invoice_Plugin
          */
         public function ajax_send_from_sale()
         {
-            $this->bootstrap_requested_blog_context();
-            $nonce = sanitize_text_field($_POST['nonce'] ?? '');
-            if (
-                empty($nonce)
-                || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
-            ) {
-                wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
-                return;
-            }
-
-            // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
-            if (!is_user_logged_in()) {
-                wp_send_json_error(['message' => 'Bạn cần đăng nhập để thực hiện thao tác này.'], 403);
-                return;
-            }
+            $this->guard_pos_ajax();
 
             $sale_ledger_id = intval($_POST['sale_ledger_id'] ?? 0);
             $force_under24  = !empty($_POST['force_under24']); // nhân viên đã xác nhận cảnh báo
@@ -2779,6 +3052,12 @@ class TGS_Viettel_Invoice_Plugin
                 return;
             }
 
+            $attempt = $this->begin_issue_attempt($sale_ledger_id, 'issue');
+            if (empty($attempt['success'])) {
+                wp_send_json_error($attempt, 409);
+                return;
+            }
+
             // Bước 3: Build payload Viettel và phát hành hóa đơn
             $issue_payload_result = $this->flow_service->build_issue_payload_from_filtered($filtered_payload, $settings);
             if (empty($issue_payload_result['success'])) {
@@ -2794,7 +3073,7 @@ class TGS_Viettel_Invoice_Plugin
                 $source_result['payload'],
                 $filtered_payload,
                 $created_by,
-                'pending',
+                'processing',
                 0,
                 0,
                 ''
@@ -2809,8 +3088,9 @@ class TGS_Viettel_Invoice_Plugin
             ]);
 
             if (empty($issue_result['success'])) {
+                $needs_reconcile = !empty($issue_result['outcome_ambiguous']);
                 $this->update_auto_flow_tracking($tracking_id, [
-                    'invoice_state' => 'issue_error',
+                    'invoice_state' => $needs_reconcile ? 'issued_needs_reconcile' : 'issue_error',
                     'issue_status' => 2,
                     'issue_request_payload' => wp_json_encode($issue_payload, JSON_UNESCAPED_UNICODE),
                     'issue_response_payload' => wp_json_encode($issue_result, JSON_UNESCAPED_UNICODE),
@@ -2822,12 +3102,14 @@ class TGS_Viettel_Invoice_Plugin
 
                 wp_send_json_error([
                     'message' => $issue_result['message'] ?? 'Lỗi phát hành hóa đơn.',
-                    'step'    => 'issue',
+                    'step'    => $needs_reconcile ? 'reconcile' : 'issue',
+                    'tracking_id' => $tracking_id,
                 ]);
                 return;
             }
 
             $transaction_uuid = $this->extract_transaction_uuid($issue_result['response'] ?? []);
+            $invoice_no = $this->extract_invoice_no_from_issue_payload($issue_result['response'] ?? []);
             $issue_response_json = wp_json_encode($issue_result['response'] ?? $issue_result, JSON_UNESCAPED_UNICODE);
             $this->update_auto_flow_tracking($tracking_id, [
                 'invoice_state' => 'issued',
@@ -2837,6 +3119,7 @@ class TGS_Viettel_Invoice_Plugin
                 'issue_http_code' => intval($issue_result['http_code'] ?? 0),
                 'issue_error_message' => '',
                 'issue_transaction_uuid' => $transaction_uuid,
+                'viettel_invoice_no' => $invoice_no,
                 'issue_sent_at' => current_time('mysql'),
                 'total_before_tax' => floatval($issue_payload_result['totals']['total_before_tax'] ?? 0),
                 'total_tax_amount' => floatval($issue_payload_result['totals']['total_tax'] ?? 0),
@@ -2850,14 +3133,19 @@ class TGS_Viettel_Invoice_Plugin
 
             if ($transaction_uuid === '') {
                 $this->update_auto_flow_tracking($tracking_id, [
-                    'invoice_state' => 'cqt_error',
+                    'invoice_state' => 'issued_needs_reconcile',
                     'send_cqt_status' => 2,
                     'cqt_error_message' => 'Không lấy được transactionUuid sau khi phát hành.',
                     'error_message' => 'Không lấy được transactionUuid sau khi phát hành.',
                     'updated_at' => current_time('mysql'),
                 ]);
 
-                wp_send_json_error(['message' => 'Phát hành thành công nhưng không lấy được transactionUuid để gửi CQT.', 'step' => 'extract_uuid']);
+                wp_send_json_error([
+                    'message' => 'Phát hành thành công nhưng thiếu transactionUuid; cần đối soát trước khi thao tác tiếp.',
+                    'step' => 'reconcile',
+                    'tracking_id' => $tracking_id,
+                    'invoice_no' => $invoice_no,
+                ], 409);
                 return;
             }
 
@@ -2915,12 +3203,6 @@ class TGS_Viettel_Invoice_Plugin
                 'updated_at' => current_time('mysql'),
             ]);
 
-            $invoice_no = $this->deep_pick($issue_result['response'] ?? [], [
-                'result.invoiceNo',
-                'data.invoiceNo',
-                'invoiceNo',
-            ]);
-
             wp_send_json_success([
                 'message'          => 'Phát hành và gửi CQT thành công!',
                 'transaction_uuid' => $transaction_uuid,
@@ -2932,7 +3214,11 @@ class TGS_Viettel_Invoice_Plugin
     public function handle_sale_completed($sale_data)
     {
         $settings = self::get_settings();
-        if (empty($settings['auto_enabled'])) {
+        if (
+            empty($settings['auto_enabled'])
+            || ($settings['auto_mode'] ?? 'issue') !== 'issue'
+            || empty($settings['auto_issue_confirmed'])
+        ) {
             return;
         }
 
@@ -2956,11 +3242,89 @@ class TGS_Viettel_Invoice_Plugin
         return array_values(array_filter(array_map('intval', $ids)));
     }
 
+    private function begin_issue_attempt($sale_ledger_id, $request_mode = 'issue')
+    {
+        $sale_ledger_id = intval($sale_ledger_id);
+        $request_mode = sanitize_key($request_mode);
+        if ($sale_ledger_id <= 0 || !defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
+            return ['success' => false, 'step' => 'idempotency', 'message' => 'Thiếu dữ liệu để khóa phát hành hóa đơn.'];
+        }
+
+        global $wpdb;
+        $lock_name = sprintf(
+            'tgs_vi:%s:%d:%d:%s',
+            substr(md5((string) DB_NAME), 0, 8),
+            get_current_blog_id(),
+            $sale_ledger_id,
+            $request_mode
+        );
+        $lock_acquired = intval($wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 0)', $lock_name))) === 1;
+        if (!$lock_acquired) {
+            return [
+                'success' => false,
+                'step' => 'idempotency',
+                'message' => 'Đơn này đang được một tiến trình khác xử lý. Vui lòng không bấm gửi lại.',
+            ];
+        }
+
+        register_shutdown_function(static function () use ($wpdb, $lock_name) {
+            $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock_name));
+        });
+
+        $latest = $wpdb->get_row(
+            $wpdb->prepare(
+                'SELECT local_viettel_invoice_id, invoice_state, issue_status, issue_transaction_uuid,
+                        viettel_invoice_no, updated_at
+                 FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . '
+                 WHERE blog_id = %d AND sale_ledger_id = %d AND request_mode = %s
+                 ORDER BY local_viettel_invoice_id DESC LIMIT 1',
+                get_current_blog_id(),
+                $sale_ledger_id,
+                $request_mode
+            ),
+            ARRAY_A
+        );
+
+        if (!empty($latest)) {
+            $state = sanitize_key($latest['invoice_state'] ?? '');
+            $has_issued_identity = intval($latest['issue_status'] ?? 0) === 1
+                || sanitize_text_field($latest['issue_transaction_uuid'] ?? '') !== ''
+                || sanitize_text_field($latest['viettel_invoice_no'] ?? '') !== '';
+            if ($has_issued_identity || in_array($state, ['issued', 'done', 'issued_needs_reconcile'], true)) {
+                return [
+                    'success' => false,
+                    'step' => 'idempotency',
+                    'tracking_id' => intval($latest['local_viettel_invoice_id']),
+                    'message' => $state === 'issued_needs_reconcile'
+                        ? 'Kết quả phát hành trước chưa rõ ràng và cần đối soát với Viettel; hệ thống không phát hành lại.'
+                        : 'Đơn này đã được phát hành hoặc đã có định danh hóa đơn; hệ thống không phát hành lại.',
+                ];
+            }
+
+            $updated_at = strtotime((string) ($latest['updated_at'] ?? ''));
+            if ($state === 'processing' && $updated_at !== false && $updated_at >= time() - (10 * MINUTE_IN_SECONDS)) {
+                return [
+                    'success' => false,
+                    'step' => 'idempotency',
+                    'tracking_id' => intval($latest['local_viettel_invoice_id']),
+                    'message' => 'Đơn này đang ở trạng thái processing. Vui lòng chờ tiến trình hiện tại hoàn tất.',
+                ];
+            }
+        }
+
+        return ['success' => true];
+    }
+
     private function run_auto_issue_cqt_flow($sale_data, $settings)
     {
         $sale_ledger_id = intval($sale_data['sale_ledger_id'] ?? 0);
         if ($sale_ledger_id <= 0) {
-            return;
+            return ['success' => false, 'step' => 'validate', 'message' => 'Thiếu sale_ledger_id.'];
+        }
+
+        $attempt = $this->begin_issue_attempt($sale_ledger_id, 'issue');
+        if (empty($attempt['success'])) {
+            return $attempt;
         }
 
         $created_by = intval($sale_data['employee_id'] ?? 0);
@@ -2975,7 +3339,7 @@ class TGS_Viettel_Invoice_Plugin
                 'error_message' => sanitize_text_field($source_result['message'] ?? 'Không thể đọc dữ liệu đơn bán.'),
                 'created_by' => $created_by,
             ]);
-            return;
+            return ['success' => false, 'step' => 'prepare_source', 'message' => sanitize_text_field($source_result['message'] ?? 'Không thể đọc dữ liệu đơn bán.')];
         }
 
         // Áp dụng customer_override nếu có (người dùng nhập thông tin khách hàng trên giao diện).
@@ -2991,22 +3355,20 @@ class TGS_Viettel_Invoice_Plugin
             }
         }
 
-        // Áp dụng danh sách loại trừ trực tiếp từ frontend (source of truth).
-        // Xoá hết flag danger trước, rồi set true chỉ cho item trong danh sách loại trừ.
-        $excluded_item_ids = isset($sale_data['excluded_item_ids']) && is_array($sale_data['excluded_item_ids'])
-            ? $sale_data['excluded_item_ids']
-            : [];
-        $excluded_ids_map = [];
-        foreach ($excluded_item_ids as $eid) {
-            $eid = intval($eid);
-            if ($eid > 0) {
-                $excluded_ids_map[$eid] = true;
+        // Chỉ frontend review mới được override snapshot; hook tự động phải giữ cờ từ DB.
+        if (array_key_exists('excluded_item_ids', $sale_data) && is_array($sale_data['excluded_item_ids'])) {
+            $excluded_ids_map = [];
+            foreach ($sale_data['excluded_item_ids'] as $eid) {
+                $eid = intval($eid);
+                if ($eid > 0) {
+                    $excluded_ids_map[$eid] = true;
+                }
             }
+            foreach ($source_result['payload']['items'] as &$src_item) {
+                $src_item['is_under24_promo_danger'] = isset($excluded_ids_map[intval($src_item['ledger_item_id'] ?? 0)]);
+            }
+            unset($src_item);
         }
-        foreach ($source_result['payload']['items'] as &$src_item) {
-            $src_item['is_under24_promo_danger'] = isset($excluded_ids_map[intval($src_item['ledger_item_id'] ?? 0)]);
-        }
-        unset($src_item);
 
         $source_payload = $source_result['payload'];
         $filtered_result = $this->flow_service->filter_and_sort_items_for_tax($source_payload);
@@ -3023,11 +3385,11 @@ class TGS_Viettel_Invoice_Plugin
                 'error_message' => sanitize_text_field($filtered_result['message'] ?? 'Lỗi lọc sản phẩm gửi thuế.'),
                 'created_by' => $created_by,
             ]);
-            return;
+            return ['success' => false, 'step' => 'filter_items', 'tracking_id' => $tracking_id, 'message' => sanitize_text_field($filtered_result['message'] ?? 'Lỗi lọc sản phẩm gửi thuế.')];
         }
 
         $filtered_payload = $filtered_result['payload'];
-        $tracking_id = $this->create_auto_flow_tracking($source_payload, $filtered_payload, $created_by, 'pending', 0, 0, '');
+        $tracking_id = $this->create_auto_flow_tracking($source_payload, $filtered_payload, $created_by, 'processing', 0, 0, '');
 
         $issue_payload_result = $this->flow_service->build_issue_payload_from_filtered($filtered_payload, $settings);
         if (empty($issue_payload_result['success'])) {
@@ -3048,7 +3410,7 @@ class TGS_Viettel_Invoice_Plugin
                 'error_message' => sanitize_text_field($issue_payload_result['message'] ?? ''),
                 'created_by' => $created_by,
             ]);
-            return;
+            return ['success' => false, 'step' => 'build_issue_payload', 'tracking_id' => $tracking_id, 'message' => sanitize_text_field($issue_payload_result['message'] ?? 'Không map được payload phát hành.')];
         }
 
         $issue_payload = $issue_payload_result['payload'];
@@ -3066,8 +3428,9 @@ class TGS_Viettel_Invoice_Plugin
         $issue_http_code = intval($issue_result['http_code'] ?? 0);
 
         if (empty($issue_result['success'])) {
+            $needs_reconcile = !empty($issue_result['outcome_ambiguous']);
             $this->update_auto_flow_tracking($tracking_id, [
-                'invoice_state' => 'issue_error',
+                'invoice_state' => $needs_reconcile ? 'issued_needs_reconcile' : 'issue_error',
                 'issue_status' => 2,
                 'issue_request_payload' => wp_json_encode($issue_payload, JSON_UNESCAPED_UNICODE),
                 'issue_response_payload' => wp_json_encode($issue_result, JSON_UNESCAPED_UNICODE),
@@ -3076,10 +3439,16 @@ class TGS_Viettel_Invoice_Plugin
                 'error_message' => sanitize_text_field($issue_result['message'] ?? 'Lỗi phát hành hóa đơn.'),
                 'updated_at' => current_time('mysql'),
             ]);
-            return;
+            return [
+                'success' => false,
+                'step' => $needs_reconcile ? 'reconcile' : 'issue',
+                'tracking_id' => $tracking_id,
+                'message' => sanitize_text_field($issue_result['message'] ?? 'Lỗi phát hành hóa đơn.'),
+            ];
         }
 
         $transaction_uuid = $this->extract_transaction_uuid($issue_result['response'] ?? []);
+        $invoice_no = $this->extract_invoice_no_from_issue_payload($issue_result['response'] ?? []);
 
         $this->update_auto_flow_tracking($tracking_id, [
             'invoice_state' => 'issued',
@@ -3089,6 +3458,7 @@ class TGS_Viettel_Invoice_Plugin
             'issue_http_code' => $issue_http_code,
             'issue_error_message' => '',
             'issue_transaction_uuid' => $transaction_uuid,
+            'viettel_invoice_no' => $invoice_no,
             'issue_sent_at' => current_time('mysql'),
             'total_before_tax' => floatval($issue_payload_result['totals']['total_before_tax'] ?? 0),
             'total_tax_amount' => floatval($issue_payload_result['totals']['total_tax'] ?? 0),
@@ -3102,7 +3472,7 @@ class TGS_Viettel_Invoice_Plugin
 
         if ($transaction_uuid === '') {
             $this->update_auto_flow_tracking($tracking_id, [
-                'invoice_state' => 'cqt_error',
+                'invoice_state' => 'issued_needs_reconcile',
                 'send_cqt_status' => 2,
                 'cqt_error_message' => 'Không lấy được transactionUuid sau khi phát hành.',
                 'error_message' => 'Không lấy được transactionUuid sau khi phát hành.',
@@ -3118,7 +3488,7 @@ class TGS_Viettel_Invoice_Plugin
                 'error_message' => 'Không lấy được transactionUuid sau khi phát hành.',
                 'created_by' => $created_by,
             ]);
-            return;
+            return ['success' => false, 'step' => 'reconcile', 'tracking_id' => $tracking_id, 'message' => 'Đã phát hành nhưng thiếu transactionUuid; cần đối soát trước khi thao tác tiếp.'];
         }
 
         $send_cqt_payload_result = $this->flow_service->build_send_cqt_payload(
@@ -3134,7 +3504,7 @@ class TGS_Viettel_Invoice_Plugin
                 'error_message' => sanitize_text_field($send_cqt_payload_result['message'] ?? 'Không tạo được payload gửi CQT.'),
                 'updated_at' => current_time('mysql'),
             ]);
-            return;
+            return ['success' => false, 'step' => 'build_cqt_payload', 'tracking_id' => $tracking_id, 'message' => sanitize_text_field($send_cqt_payload_result['message'] ?? 'Không tạo được payload gửi CQT.')];
         }
 
         $send_cqt_payload = $send_cqt_payload_result['payload'];
@@ -3161,7 +3531,7 @@ class TGS_Viettel_Invoice_Plugin
                 'error_message' => sanitize_text_field($cqt_result['message'] ?? 'Lỗi gửi CQT.'),
                 'updated_at' => current_time('mysql'),
             ]);
-            return;
+            return ['success' => false, 'step' => 'send_cqt', 'tracking_id' => $tracking_id, 'message' => sanitize_text_field($cqt_result['message'] ?? 'Lỗi gửi CQT.')];
         }
 
         $this->update_auto_flow_tracking($tracking_id, [
@@ -3175,6 +3545,15 @@ class TGS_Viettel_Invoice_Plugin
             'cqt_sent_at' => current_time('mysql'),
             'updated_at' => current_time('mysql'),
         ]);
+
+        return [
+            'success' => true,
+            'step' => 'done',
+            'tracking_id' => $tracking_id,
+            'transaction_uuid' => $transaction_uuid,
+            'invoice_no' => $this->extract_invoice_no_from_issue_payload($issue_result['response'] ?? []),
+            'message' => 'Phát hành và gửi CQT thành công.',
+        ];
     }
 
     private function create_auto_flow_tracking($source_payload, $filtered_payload, $created_by, $invoice_state, $issue_status, $send_cqt_status, $error_message)
@@ -3259,17 +3638,14 @@ class TGS_Viettel_Invoice_Plugin
             'result.transactionUuid',
             'result.transactionUUID',
             'result.transactionId',
-            'result.invoiceNo',
             'data.transactionID',
             'data.transactionUuid',
             'data.transactionUUID',
             'data.transactionId',
-            'data.invoiceNo',
             'transactionID',
             'transactionUuid',
             'transactionUUID',
             'transactionId',
-            'invoiceNo',
         ]);
     }
 
@@ -3368,4 +3744,5 @@ function tgs_viettel_invoice()
     return TGS_Viettel_Invoice_Plugin::instance();
 }
 
+register_deactivation_hook(__FILE__, ['TGS_Viettel_Invoice_Plugin', 'deactivate']);
 tgs_viettel_invoice();

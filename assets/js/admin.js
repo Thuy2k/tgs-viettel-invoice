@@ -24,7 +24,9 @@
             default_invoice_series: $('#vi_default_invoice_series').val(),
             default_payment_method: $('#vi_default_payment_method').val(),
             auto_enabled: $('#vi_auto_enabled').is(':checked') ? 1 : 0,
-            auto_mode: $('#vi_auto_mode').val()
+            auto_issue_confirmed: $('#vi_auto_issue_confirmed').is(':checked') ? 1 : 0,
+            auto_mode: $('#vi_auto_mode').val(),
+            log_retention_days: $('#vi_log_retention_days').val()
         };
     }
 

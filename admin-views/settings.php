@@ -78,6 +78,17 @@ $is_multisite = is_multisite();
                     <option value="draft" <?php selected($settings['auto_mode'], 'draft'); ?>>Tự động tạo nháp</option>
                     <option value="issue" <?php selected($settings['auto_mode'], 'issue'); ?>>Tự động phát hành</option>
                 </select>
+                <div class="form-check mt-3 p-3 border border-danger rounded bg-light">
+                    <input class="form-check-input" type="checkbox" id="vi_auto_issue_confirmed" <?php checked((int) $settings['auto_issue_confirmed'], 1); ?>>
+                    <label class="form-check-label text-danger" for="vi_auto_issue_confirmed">
+                        Tôi xác nhận tự động phát hành là thao tác không thể hoàn tác và chỉ bật sau khi đã kiểm thử end-to-end.
+                    </label>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label" for="vi_log_retention_days">Thời gian lưu log hóa đơn (ngày)</label>
+                <input type="number" min="0" max="3650" class="form-control" id="vi_log_retention_days" value="<?php echo esc_attr((int) $settings['log_retention_days']); ?>">
+                <div class="form-text">Đặt 0 để không tự xóa. Khi lớn hơn 0, WP-Cron sẽ xóa log cũ hơn số ngày này.</div>
             </div>
             <div class="col-12">
                 <button type="button" class="btn btn-primary" id="vi_save_common_settings">Lưu cấu hình chung</button>

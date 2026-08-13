@@ -81,11 +81,28 @@ class TGS_Viettel_Invoice_Plugin
         add_action('wp_ajax_nopriv_tgs_viettel_pos_update_danger_flags', [$this, 'ajax_pos_update_danger_flags']);
 
 
-        // Nút "Gửi CQT" trên popup in hóa đơn POS (ưu tiên 20 để xuất sau nút Xuất HĐDT)
+        /*
+         * Nút "Gửi lên cục thuế" trên popup in bill POS — lối gửi BẰNG TAY cho
+         * thu ngân. Ưu tiên 20 để nút xếp sau nút Xuất HĐĐT.
+         *
+         * ⚠️ Đang chạy SONG SONG với luồng tự động (hook tgs_sale_completed bên
+         * dưới). Đơn đã tự động phát hành mà bấm nút này nữa là dễ GỬI TRÙNG —
+         * xem lại flow_service có chặn đơn đã có hoá đơn hay không trước khi
+         * giao cho thu ngân dùng hằng ngày.
+         */
         add_action('tgs_pos_receipt_footer_buttons', [$this, 'render_cqt_receipt_button'], 20);
 
-        // Theo luồng POS mới: KHÔNG tự động gửi thuế ngay khi tạo đơn sale.
-        // add_action('tgs_sale_completed', [$this, 'handle_sale_completed'], 20, 1);
+        /*
+         * Tự động phát hành hoá đơn lên cơ quan thuế ngay khi POS chốt đơn.
+         *
+         * ⚠️ CÓ HAI CÔNG TẮC, hook này chỉ là công tắc thứ nhất. Bên trong
+         * handle_sale_completed() còn kiểm `auto_enabled` trong cài đặt — tắt
+         * cái đó thì hook chạy nhưng không gửi gì. Muốn gửi thật phải bật cả hai.
+         *
+         * Gửi hoá đơn lên cơ quan thuế là việc KHÔNG HOÀN TÁC được: sai thì
+         * phải làm hoá đơn điều chỉnh/thay thế, không xoá đi được.
+         */
+        add_action('tgs_sale_completed', [$this, 'handle_sale_completed'], 20, 1);
 
         if (is_admin() && !wp_doing_ajax()) {
             add_action('admin_init', [$this, 'run_migration']);
@@ -759,8 +776,14 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
+<<<<<<< HEAD
         if (!$this->current_user_can_use_pos()) {
             wp_send_json_error(['message' => 'Bạn không có quyền xem nhật ký.'], 403);
+=======
+        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
+        if (!is_user_logged_in()) {
+            wp_send_json_error(['message' => 'Bạn cần đăng nhập để xem nhật ký.'], 403);
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             return;
         }
 
@@ -886,8 +909,14 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
+<<<<<<< HEAD
         if (!$this->current_user_can_use_pos()) {
             wp_send_json_error(['message' => 'Bạn không có quyền xem danh sách.'], 403);
+=======
+        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
+        if (!is_user_logged_in()) {
+            wp_send_json_error(['message' => 'Bạn cần đăng nhập để xem danh sách.'], 403);
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             return;
         }
 
@@ -1174,8 +1203,13 @@ class TGS_Viettel_Invoice_Plugin
             $wpdb->prepare(
                 'SELECT i.local_ledger_item_id, i.local_product_name_id,
                         i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price,
+<<<<<<< HEAD
                         i.local_ledger_item_discount, i.local_ledger_item_discount_type'
                         . $tax_percent_sql . $discount_amount_sql . $tax_amount_sql . $danger_col_sql . $pad_col_sql . $global_id_sql . $sku_sql . '
+=======
+                        i.local_ledger_item_discount_amount'
+                        . $tax_percent_sql . $danger_col_sql . $pad_col_sql . $global_id_sql . $sku_sql . '
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  WHERE i.local_ledger_item_id IN (' . $placeholders . ')
                  ORDER BY i.local_ledger_item_id ASC',
@@ -1230,9 +1264,21 @@ class TGS_Viettel_Invoice_Plugin
             $sku = (string) ($row['local_product_sku'] ?? '');
             $danger = $has_danger_col ? intval($row['local_ledger_item_is_under24_promo_danger'] ?? 0) : 0;
 
+<<<<<<< HEAD
             $disc_value = floatval($row['local_ledger_item_discount'] ?? 0);
             $disc_type = (string) ($row['local_ledger_item_discount_type'] ?? '');
             $disc_amount = floatval($row['local_ledger_item_discount_amount'] ?? 0);
+=======
+            /*
+             * CK% suy từ tiền chiết khấu — hai cột discount / discount_type đã
+             * ngừng ghi, và trên dữ liệu cũ cột `discount` còn lẫn lộn giữa
+             * phần trăm và tiền. Xem TGS_Money::discount_percent_of().
+             */
+            $disc_value = class_exists('TGS_Money')
+                ? TGS_Money::discount_percent_of($row, $row['local_ledger_item_discount'] ?? 0)
+                : floatval($row['local_ledger_item_discount'] ?? 0);
+            $disc_type = $disc_value > 0 ? 'percent' : '';
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             $price_after_disc = $has_pad_col ? floatval($row['local_ledger_item_price_after_discount'] ?? $row['price']) : floatval($row['price']);
             $tax_percent = floatval($row['local_ledger_item_tax_percent'] ?? 0);
             $tax_amount = floatval($row['local_ledger_item_tax_amount'] ?? 0);
@@ -1381,8 +1427,14 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
+<<<<<<< HEAD
         if (!$this->current_user_can_use_pos()) {
             wp_send_json_error(['message' => 'Bạn không có quyền gửi lại hóa đơn.'], 403);
+=======
+        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
+        if (!is_user_logged_in()) {
+            wp_send_json_error(['message' => 'Bạn cần đăng nhập để gửi lại hóa đơn.'], 403);
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             return;
         }
 
@@ -1573,8 +1625,14 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
+<<<<<<< HEAD
         if (!$this->current_user_can_use_pos()) {
             wp_send_json_error(['message' => 'Bạn không có quyền gửi email hóa đơn.'], 403);
+=======
+        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
+        if (!is_user_logged_in()) {
+            wp_send_json_error(['message' => 'Bạn cần đăng nhập để gửi email hóa đơn.'], 403);
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             return;
         }
 
@@ -1833,6 +1891,69 @@ class TGS_Viettel_Invoice_Plugin
         ]);
     }
 
+<<<<<<< HEAD
+=======
+    public function ajax_lookup_customer_by_tax_code()
+    {
+        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+        if (
+            empty($nonce)
+            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
+        ) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+            return;
+        }
+
+        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
+        if (!is_user_logged_in()) {
+            wp_send_json_error(['message' => 'Bạn cần đăng nhập để tra cứu khách hàng.'], 403);
+            return;
+        }
+
+        if (!defined('TGS_TABLE_LOCAL_LEDGER_PERSON')) {
+            wp_send_json_error(['message' => 'Chưa tìm thấy bảng dữ liệu khách hàng.'], 500);
+            return;
+        }
+
+        $tax_code = trim(sanitize_text_field($_POST['tax_code'] ?? ''));
+        if ($tax_code === '') {
+            wp_send_json_error(['message' => 'Vui lòng nhập mã số thuế cần tra cứu.'], 400);
+            return;
+        }
+
+        global $wpdb;
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                'SELECT local_ledger_person_id, local_ledger_person_name, local_ledger_person_address,
+                        local_ledger_person_phone, local_ledger_person_email, local_ledger_person_tax_code
+                 FROM ' . TGS_TABLE_LOCAL_LEDGER_PERSON . '
+                 WHERE local_ledger_person_tax_code LIKE %s
+                 LIMIT 20',
+                '%' . $wpdb->esc_like($tax_code) . '%'
+            ),
+            ARRAY_A
+        );
+
+        $customers = [];
+        if (!empty($rows)) {
+            foreach ($rows as $row) {
+                $customers[] = [
+                    'id'      => intval($row['local_ledger_person_id']),
+                    'name'    => (string) ($row['local_ledger_person_name'] ?? ''),
+                    'phone'   => (string) ($row['local_ledger_person_phone'] ?? ''),
+                    'address' => (string) ($row['local_ledger_person_address'] ?? ''),
+                    'email'   => (string) ($row['local_ledger_person_email'] ?? ''),
+                    'tax_code' => (string) ($row['local_ledger_person_tax_code'] ?? ''),
+                ];
+            }
+        }
+
+        wp_send_json_success([
+            'customers' => $customers,
+            'message'   => count($customers) > 0 ? 'Tìm thấy ' . count($customers) . ' khách hàng.' : 'Không tìm thấy khách hàng nào.',
+        ]);
+    }
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
 
     /**
      * POS: xem trực tiếp PDF hóa đơn trong trình duyệt.
@@ -1849,8 +1970,14 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
+<<<<<<< HEAD
         if (!$this->current_user_can_use_pos()) {
             wp_send_json_error(['message' => 'Bạn không có quyền xem PDF hóa đơn.'], 403);
+=======
+        // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
+        if (!is_user_logged_in()) {
+            wp_send_json_error(['message' => 'Bạn cần đăng nhập để xem PDF hóa đơn.'], 403);
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             return;
         }
 
@@ -2619,8 +2746,14 @@ class TGS_Viettel_Invoice_Plugin
                 return;
             }
 
+<<<<<<< HEAD
             if (!$this->current_user_can_use_pos()) {
                 wp_send_json_error(['message' => 'Bạn không có quyền thực hiện thao tác này.'], 403);
+=======
+            // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
+            if (!is_user_logged_in()) {
+                wp_send_json_error(['message' => 'Bạn cần đăng nhập để thực hiện thao tác này.'], 403);
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
                 return;
             }
 

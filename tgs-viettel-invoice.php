@@ -776,14 +776,9 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-<<<<<<< HEAD
-        if (!$this->current_user_can_use_pos()) {
-            wp_send_json_error(['message' => 'Bạn không có quyền xem nhật ký.'], 403);
-=======
         // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
         if (!is_user_logged_in()) {
             wp_send_json_error(['message' => 'Bạn cần đăng nhập để xem nhật ký.'], 403);
->>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             return;
         }
 
@@ -909,14 +904,9 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-<<<<<<< HEAD
-        if (!$this->current_user_can_use_pos()) {
-            wp_send_json_error(['message' => 'Bạn không có quyền xem danh sách.'], 403);
-=======
         // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
         if (!is_user_logged_in()) {
             wp_send_json_error(['message' => 'Bạn cần đăng nhập để xem danh sách.'], 403);
->>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             return;
         }
 
@@ -1203,13 +1193,8 @@ class TGS_Viettel_Invoice_Plugin
             $wpdb->prepare(
                 'SELECT i.local_ledger_item_id, i.local_product_name_id,
                         i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price,
-<<<<<<< HEAD
-                        i.local_ledger_item_discount, i.local_ledger_item_discount_type'
-                        . $tax_percent_sql . $discount_amount_sql . $tax_amount_sql . $danger_col_sql . $pad_col_sql . $global_id_sql . $sku_sql . '
-=======
                         i.local_ledger_item_discount_amount'
                         . $tax_percent_sql . $danger_col_sql . $pad_col_sql . $global_id_sql . $sku_sql . '
->>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  WHERE i.local_ledger_item_id IN (' . $placeholders . ')
                  ORDER BY i.local_ledger_item_id ASC',
@@ -1264,11 +1249,6 @@ class TGS_Viettel_Invoice_Plugin
             $sku = (string) ($row['local_product_sku'] ?? '');
             $danger = $has_danger_col ? intval($row['local_ledger_item_is_under24_promo_danger'] ?? 0) : 0;
 
-<<<<<<< HEAD
-            $disc_value = floatval($row['local_ledger_item_discount'] ?? 0);
-            $disc_type = (string) ($row['local_ledger_item_discount_type'] ?? '');
-            $disc_amount = floatval($row['local_ledger_item_discount_amount'] ?? 0);
-=======
             /*
              * CK% suy từ tiền chiết khấu — hai cột discount / discount_type đã
              * ngừng ghi, và trên dữ liệu cũ cột `discount` còn lẫn lộn giữa
@@ -1278,7 +1258,6 @@ class TGS_Viettel_Invoice_Plugin
                 ? TGS_Money::discount_percent_of($row, $row['local_ledger_item_discount'] ?? 0)
                 : floatval($row['local_ledger_item_discount'] ?? 0);
             $disc_type = $disc_value > 0 ? 'percent' : '';
->>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             $price_after_disc = $has_pad_col ? floatval($row['local_ledger_item_price_after_discount'] ?? $row['price']) : floatval($row['price']);
             $tax_percent = floatval($row['local_ledger_item_tax_percent'] ?? 0);
             $tax_amount = floatval($row['local_ledger_item_tax_amount'] ?? 0);
@@ -1427,14 +1406,9 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-<<<<<<< HEAD
-        if (!$this->current_user_can_use_pos()) {
-            wp_send_json_error(['message' => 'Bạn không có quyền gửi lại hóa đơn.'], 403);
-=======
         // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
         if (!is_user_logged_in()) {
             wp_send_json_error(['message' => 'Bạn cần đăng nhập để gửi lại hóa đơn.'], 403);
->>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             return;
         }
 
@@ -1625,14 +1599,9 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-<<<<<<< HEAD
-        if (!$this->current_user_can_use_pos()) {
-            wp_send_json_error(['message' => 'Bạn không có quyền gửi email hóa đơn.'], 403);
-=======
         // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
         if (!is_user_logged_in()) {
             wp_send_json_error(['message' => 'Bạn cần đăng nhập để gửi email hóa đơn.'], 403);
->>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             return;
         }
 
@@ -1891,8 +1860,6 @@ class TGS_Viettel_Invoice_Plugin
         ]);
     }
 
-<<<<<<< HEAD
-=======
     public function ajax_lookup_customer_by_tax_code()
     {
         $nonce = sanitize_text_field($_POST['nonce'] ?? '');
@@ -1953,7 +1920,6 @@ class TGS_Viettel_Invoice_Plugin
             'message'   => count($customers) > 0 ? 'Tìm thấy ' . count($customers) . ' khách hàng.' : 'Không tìm thấy khách hàng nào.',
         ]);
     }
->>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
 
     /**
      * POS: xem trực tiếp PDF hóa đơn trong trình duyệt.
@@ -1970,14 +1936,9 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-<<<<<<< HEAD
-        if (!$this->current_user_can_use_pos()) {
-            wp_send_json_error(['message' => 'Bạn không có quyền xem PDF hóa đơn.'], 403);
-=======
         // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
         if (!is_user_logged_in()) {
             wp_send_json_error(['message' => 'Bạn cần đăng nhập để xem PDF hóa đơn.'], 403);
->>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             return;
         }
 
@@ -2713,21 +2674,20 @@ class TGS_Viettel_Invoice_Plugin
         public function render_cqt_receipt_button()
         {
             ?>
-            <button type="button"
-                x-on:click="openItemReviewModal()"
-                :disabled="isReceiptLoading || viettelCQT.isSending || viettelItemReview.isSaving"
-                :class="isReceiptLoading || viettelCQT.isSending || viettelItemReview.isSaving ? 'opacity-60 cursor-not-allowed' : ''"
-                class="flex-1 min-w-[120px] py-3 bg-green-600 rounded-xl text-sm font-medium text-white hover:bg-green-700">
-                <span x-show="!viettelCQT.isSending && !viettelItemReview.isSaving">Gửi lên cục thuế</span>
-                <span x-show="viettelCQT.isSending || viettelItemReview.isSaving" class="flex items-center justify-center gap-1">
-                    <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
-                    </svg>
-                    Đang xử lý...
-                </span>
-            </button>
-            <?php
+<button type="button" x-on:click="openItemReviewModal()"
+    :disabled="isReceiptLoading || viettelCQT.isSending || viettelItemReview.isSaving"
+    :class="isReceiptLoading || viettelCQT.isSending || viettelItemReview.isSaving ? 'opacity-60 cursor-not-allowed' : ''"
+    class="flex-1 min-w-[120px] py-3 bg-green-600 rounded-xl text-sm font-medium text-white hover:bg-green-700">
+    <span x-show="!viettelCQT.isSending && !viettelItemReview.isSaving">Gửi lên cục thuế</span>
+    <span x-show="viettelCQT.isSending || viettelItemReview.isSaving" class="flex items-center justify-center gap-1">
+        <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
+        </svg>
+        Đang xử lý...
+    </span>
+</button>
+<?php
         }
 
         /**
@@ -2746,14 +2706,9 @@ class TGS_Viettel_Invoice_Plugin
                 return;
             }
 
-<<<<<<< HEAD
-            if (!$this->current_user_can_use_pos()) {
-                wp_send_json_error(['message' => 'Bạn không có quyền thực hiện thao tác này.'], 403);
-=======
             // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
             if (!is_user_logged_in()) {
                 wp_send_json_error(['message' => 'Bạn cần đăng nhập để thực hiện thao tác này.'], 403);
->>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
                 return;
             }
 

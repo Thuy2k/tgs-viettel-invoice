@@ -234,27 +234,6 @@ class TGS_Viettel_Invoice_Flow_Service
             ];
         }
 
-        /*
-         * ─── CHẶN TRƯỚC KHI GỬI: dòng nào chưa khai thuế suất thì dừng ──────
-         *
-         * Phải chặn NGAY TẠI ĐÂY, không để lọt xuống dưới. Nếu để tiếp, giá trị
-         * null sẽ bị floatval() biến thành 0 và hoá đơn lặng lẽ gửi đi với thuế
-         * suất 0% — còn tệ hơn cả việc đoán 8%, vì không ai biết là đã sai.
-         *
-         * Hoá đơn đã phát hành không sửa được, nên thà dừng và báo rõ mã hàng
-         * nào thiếu để người dùng đi khai.
-         */
-        $thieu_thue = self::lines_missing_tax($source_items);
-        if (!empty($thieu_thue)) {
-            return [
-                'success' => false,
-                'message' => 'Chưa xuất được hoá đơn: các mặt hàng sau chưa khai thuế suất — '
-                    . implode('; ', $thieu_thue)
-                    . '. Vào sửa thuế suất cho những mã này rồi xuất lại.',
-                'missing_tax_items' => $thieu_thue,
-            ];
-        }
-
         return [
             'success' => true,
             'message' => 'Đã xây dựng payload trung gian từ đơn bán hàng.',
@@ -382,6 +361,19 @@ class TGS_Viettel_Invoice_Flow_Service
             $sorted_items[] = $item;
         }
 
+        // Chỉ kiểm tra những dòng thực sự sẽ gửi CQT. Dòng Z/quà đã loại ở trên
+        // không được phép chặn cả hóa đơn vì thiếu thuế suất.
+        $thieu_thue = self::lines_missing_tax($sorted_items);
+        if (!empty($thieu_thue)) {
+            return [
+                'success' => false,
+                'message' => 'Chưa xuất được hoá đơn: các mặt hàng sau chưa khai thuế suất — '
+                    . implode('; ', $thieu_thue)
+                    . '. Vào sửa thuế suất cho những mã này rồi xuất lại.',
+                'missing_tax_items' => $thieu_thue,
+            ];
+        }
+
         return [
             'success' => true,
             'message' => 'Đã lọc và sắp xếp item theo quy tắc thuế.',
@@ -404,6 +396,18 @@ class TGS_Viettel_Invoice_Flow_Service
             return [
                 'success' => false,
                 'message' => 'Danh sách sản phẩm sau lọc đang rỗng, không thể phát hành hóa đơn.',
+            ];
+        }
+
+        // Lớp bảo vệ cho mọi caller gọi thẳng bước phát hành mà bỏ qua bước lọc.
+        $thieu_thue = self::lines_missing_tax($items);
+        if (!empty($thieu_thue)) {
+            return [
+                'success' => false,
+                'message' => 'Chưa xuất được hoá đơn: các mặt hàng sau chưa khai thuế suất — '
+                    . implode('; ', $thieu_thue)
+                    . '. Vào sửa thuế suất cho những mã này rồi xuất lại.',
+                'missing_tax_items' => $thieu_thue,
             ];
         }
 

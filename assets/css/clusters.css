@@ -1,0 +1,125 @@
+body.vi-cluster-modal-open { overflow: hidden; }
+
+#vi-cluster-admin > .card-header { min-height: 58px; background: #185abd !important; color: #fff !important; }
+#vi-cluster-create-main { box-shadow: 0 4px 12px rgba(20, 73, 160, .2); }
+.vi-cluster-toolbar { padding: 4px 0; }
+.vi-cluster-onboarding { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.vi-cluster-onboarding > div { position: relative; min-height: 74px; padding: 12px 14px 12px 50px; border: 1px solid #dbe5f3; border-radius: 8px; background: #f8fbff; }
+.vi-cluster-onboarding span { position: absolute; top: 15px; left: 14px; display: inline-flex; align-items: center; justify-content: center; width: 27px; height: 27px; border-radius: 50%; background: #185abd; color: #fff; font-weight: 700; }
+.vi-cluster-onboarding strong,
+.vi-cluster-onboarding small { display: block; }
+.vi-cluster-onboarding small { margin-top: 3px; color: #667085; }
+
+.vi-cluster-backdrop {
+    position: fixed !important;
+    inset: 0 !important;
+    z-index: 2147483000 !important;
+    background: rgba(25, 33, 48, .55);
+    backdrop-filter: blur(2px);
+}
+
+.vi-cluster-editor {
+    position: fixed !important;
+    z-index: 2147483001 !important;
+    top: 24px !important;
+    right: 24px !important;
+    bottom: 24px !important;
+    left: 24px !important;
+    margin: 0 !important;
+    width: auto !important;
+    height: auto !important;
+    max-width: none !important;
+    max-height: none !important;
+    overflow: hidden !important;
+    display: flex;
+    flex-direction: column;
+    visibility: visible !important;
+    opacity: 1 !important;
+    transform: none !important;
+    border: 0;
+    border-radius: 8px;
+    background: #fff;
+    box-shadow: 0 18px 60px rgba(0, 0, 0, .3);
+}
+
+.vi-cluster-editor > .card-header {
+    flex: 0 0 auto;
+    min-height: 58px;
+    padding: 14px 20px;
+    border-bottom: 1px solid #dce3ed;
+    background: #fff;
+    font-size: 18px;
+}
+
+.vi-cluster-editor > .card-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 20px 24px 28px;
+    scroll-behavior: smooth;
+}
+
+.vi-section-heading {
+    margin-top: 24px;
+    padding: 20px 0 8px;
+    border-top: 1px solid #dce3ed;
+    scroll-margin-top: 20px;
+}
+.vi-section-heading:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
+.vi-section-heading strong { display: block; font-size: 16px; }
+
+.vi-cluster-action-bar {
+    position: relative;
+    z-index: 2;
+    flex: 0 0 auto;
+    padding: 12px 24px 14px;
+    border-top: 1px solid #dce3ed;
+    background: rgba(255, 255, 255, .97);
+    box-shadow: 0 -8px 18px rgba(30, 41, 59, .08);
+}
+
+#vi-cluster-editor-feedback,
+#vi-cluster-feedback { white-space: pre-line; }
+#vi-cluster-editor-feedback { padding: 10px 14px; }
+#vi-cluster-editor-feedback { max-height: 88px; overflow-y: auto; }
+
+.vi-cluster-toast {
+    position: fixed;
+    z-index: 2147483002;
+    top: 24px;
+    right: 24px;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    width: min(440px, calc(100vw - 32px));
+    padding: 14px 16px;
+    border-left: 5px solid;
+    border-radius: 8px;
+    background: #fff;
+    box-shadow: 0 12px 35px rgba(0, 0, 0, .25);
+    white-space: pre-line;
+}
+.vi-cluster-toast.success { border-color: #1f9d55; color: #146c3a; }
+.vi-cluster-toast.danger { border-color: #dc3545; color: #a52834; }
+.vi-cluster-toast.warning { border-color: #f0ad00; color: #7a5900; }
+.vi-cluster-toast.info { border-color: #168aad; color: #08647e; }
+.vi-cluster-toast-icon { flex: 0 0 auto; font-weight: 700; }
+.vi-cluster-toast-text { flex: 1 1 auto; }
+.vi-cluster-toast-close { border: 0; background: transparent; color: inherit; font-size: 20px; line-height: 1; }
+
+.vi-shop-results { max-height: 280px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: .375rem; }
+.vi-shop-row { display: flex; gap: .6rem; align-items: flex-start; padding: .55rem .75rem; border-bottom: 1px solid #eee; }
+.vi-shop-row:last-child { border-bottom: 0; }
+.vi-shop-row:hover { background: #f8f9fa; }
+.vi-shop-meta { min-width: 0; flex: 1; }
+.vi-shop-domain { display: block; color: #6c757d; font-size: .8rem; overflow: hidden; text-overflow: ellipsis; }
+.vi-selected-shops { display: flex; flex-wrap: wrap; gap: .35rem; }
+.vi-shop-tag { background: #e9f5ff; border: 1px solid #b6dcfa; border-radius: 999px; padding: .25rem .55rem; font-size: .82rem; }
+.vi-shop-tag button { border: 0; background: transparent; color: #a00; padding: 0 0 0 .35rem; }
+
+@media (max-width: 767px) {
+    .vi-cluster-onboarding { grid-template-columns: 1fr; }
+    .vi-cluster-editor { top: 0 !important; right: 0 !important; bottom: 0 !important; left: 0 !important; border-radius: 0; }
+    .vi-cluster-editor > .card-body { padding-right: 14px; padding-left: 14px; }
+    .vi-cluster-toast { top: 12px; right: 16px; }
+}

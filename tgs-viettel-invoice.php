@@ -3,7 +3,7 @@
  * Plugin Name: TGS Viettel Invoice
  * Plugin URI:  https://thegioisua.vn
  * Description: Tạo hóa đơn nháp/phát hành trên Viettel VInvoice, tích hợp vào TGS Shop Management.
- * Version:     1.0.0
+ * Version:     1.1.4
  * Author:      TGS Team
  * Text Domain: tgs-viettel-invoice
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TGS_VIETTEL_INVOICE_VERSION', '1.0.0');
+define('TGS_VIETTEL_INVOICE_VERSION', '1.1.4');
 define('TGS_VIETTEL_INVOICE_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TGS_VIETTEL_INVOICE_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -25,6 +25,11 @@ if (file_exists($tgs_viettel_global_products_file)) {
 $tgs_viettel_flow_service_file = TGS_VIETTEL_INVOICE_PLUGIN_DIR . 'includes/class-tgs-viettel-invoice-flow-service.php';
 if (file_exists($tgs_viettel_flow_service_file)) {
     require_once $tgs_viettel_flow_service_file;
+}
+
+$tgs_viettel_clusters_file = TGS_VIETTEL_INVOICE_PLUGIN_DIR . 'includes/class-tgs-viettel-invoice-clusters.php';
+if (file_exists($tgs_viettel_clusters_file)) {
+    require_once $tgs_viettel_clusters_file;
 }
 
 class TGS_Viettel_Invoice_Plugin
@@ -46,6 +51,9 @@ class TGS_Viettel_Invoice_Plugin
 
     private function __construct()
     {
+        if (class_exists('TGS_Viettel_Invoice_Clusters')) {
+            TGS_Viettel_Invoice_Clusters::instance();
+        }
         if (class_exists('TGS_Viettel_Invoice_Flow_Service')) {
             $this->flow_service = new TGS_Viettel_Invoice_Flow_Service();
         }
@@ -269,6 +277,22 @@ class TGS_Viettel_Invoice_Plugin
             true
         );
 
+        if ($view === 'viettel-invoice-settings') {
+            wp_enqueue_style(
+                'tgs-viettel-invoice-clusters',
+                TGS_VIETTEL_INVOICE_PLUGIN_URL . 'assets/css/clusters.css',
+                [],
+                TGS_VIETTEL_INVOICE_VERSION
+            );
+            wp_enqueue_script(
+                'tgs-viettel-invoice-clusters',
+                TGS_VIETTEL_INVOICE_PLUGIN_URL . 'assets/js/clusters.js',
+                ['jquery', 'tgs-viettel-invoice-admin'],
+                TGS_VIETTEL_INVOICE_VERSION,
+                true
+            );
+        }
+
         wp_localize_script('tgs-viettel-invoice-admin', 'tgsViettelInvoice', [
             'ajaxUrl' => admin_url('admin-ajax.php'),
             'nonce' => wp_create_nonce('tgs_viettel_invoice_nonce'),
@@ -337,13 +361,33 @@ class TGS_Viettel_Invoice_Plugin
         return $shop;
     }
 
-    public static function get_settings()
+    public static function get_settings($blog_id = null)
     {
-        return array_merge(
+        $legacy = array_merge(
             self::get_default_settings(),
             self::get_common_settings(),
             self::get_shop_settings()
         );
+
+        if (class_exists('TGS_Viettel_Invoice_Clusters')) {
+            return TGS_Viettel_Invoice_Clusters::instance()->resolve(
+                $blog_id === null ? get_current_blog_id() : (int) $blog_id,
+                $legacy
+            );
+        }
+        return $legacy;
+    }
+
+    public static function get_settings_for_invoice($invoice_record_id, $blog_id = null)
+    {
+        $blog_id = $blog_id === null ? get_current_blog_id() : (int) $blog_id;
+        if (class_exists('TGS_Viettel_Invoice_Clusters') && $invoice_record_id > 0) {
+            $snapshot = TGS_Viettel_Invoice_Clusters::instance()->get_snapshot_settings($blog_id, (int) $invoice_record_id);
+            if (!empty($snapshot)) {
+                return $snapshot;
+            }
+        }
+        return self::get_settings($blog_id);
     }
 
     private function sanitize_common_settings($data)
@@ -739,7 +783,7 @@ class TGS_Viettel_Invoice_Plugin
             ['%d']
         );
 
-        $settings = self::get_settings();
+        $settings = self::get_settings_for_invoice($invoice_id);
         if (empty($settings['auto_enabled'])) {
             wp_send_json_error(['message' => 'Chế độ tự động đang tắt, chưa thể gửi lại tự động.'], 400);
         }
@@ -1486,7 +1530,7 @@ class TGS_Viettel_Invoice_Plugin
 
         // Case 1: Đã issue thành công => chỉ gửi lại CQT, không tạo lại hóa đơn.
         if ($issue_status === 1 && $transaction_uuid !== '') {
-            $settings = self::get_settings();
+            $settings = self::get_settings_for_invoice($invoice_id);
             $cqt_payload_result = $this->flow_service->build_send_cqt_payload(
                 sanitize_text_field($settings['supplier_tax_code'] ?? ''),
                 $transaction_uuid
@@ -1560,7 +1604,7 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        $settings = self::get_settings();
+        $settings = self::get_settings_for_invoice($invoice_id);
         if (empty($settings['username']) || empty($settings['supplier_tax_code'])) {
             wp_send_json_error(['message' => 'Chưa cấu hình Viettel Invoice. Vui lòng vào Cấu hình để thiết lập.'], 400);
             return;
@@ -1661,7 +1705,7 @@ class TGS_Viettel_Invoice_Plugin
             $template_code = $defaults['default_template_code'] ?? '1/1156';
         }
 
-        $settings = self::get_settings();
+        $settings = self::get_settings_for_invoice(intval($latest['local_viettel_invoice_id'] ?? 0));
         $supplier_tax_code = sanitize_text_field($settings['supplier_tax_code'] ?? '');
         if ($supplier_tax_code === '') {
             wp_send_json_error(['message' => 'Thiếu MST nhà cung cấp trong cấu hình Viettel.'], 400);
@@ -1992,7 +2036,7 @@ class TGS_Viettel_Invoice_Plugin
             $template_code = $defaults['default_template_code'] ?? '1/1156';
         }
 
-        $settings = self::get_settings();
+        $settings = self::get_settings_for_invoice(intval($latest['local_viettel_invoice_id'] ?? 0));
         $supplier_tax_code = sanitize_text_field($settings['supplier_tax_code'] ?? '');
         if ($supplier_tax_code === '') {
             wp_send_json_error(['message' => 'Thiếu MST nhà cung cấp trong cấu hình Viettel.'], 400);
@@ -2212,7 +2256,10 @@ class TGS_Viettel_Invoice_Plugin
 
     private function submit_invoice_payload($payload, $mode, $context = [])
     {
-        $settings = self::get_settings();
+        $context_invoice_id = intval($context['invoice_record_id'] ?? 0);
+        $settings = $context_invoice_id > 0
+            ? self::get_settings_for_invoice($context_invoice_id)
+            : self::get_settings();
         if ($mode === 'cancel' && empty($payload['supplierTaxCode']) && !empty($settings['supplier_tax_code'])) {
             $payload['supplierTaxCode'] = $settings['supplier_tax_code'];
         }
@@ -2337,6 +2384,15 @@ class TGS_Viettel_Invoice_Plugin
             ]);
         }
 
+        if ($invoice_id > 0 && class_exists('TGS_Viettel_Invoice_Clusters')) {
+            TGS_Viettel_Invoice_Clusters::instance()->save_snapshot(
+                get_current_blog_id(),
+                $invoice_id,
+                intval($context['sale_ledger_id'] ?? 0),
+                $settings
+            );
+        }
+
         $action_name = ($mode === 'issue')
             ? 'create_invoice'
             : (($mode === 'cancel') ? 'cancel_invoice' : (($mode === 'send_cqt') ? 'send_cqt' : 'create_draft'));
@@ -2380,6 +2436,10 @@ class TGS_Viettel_Invoice_Plugin
 
     private function validate_before_send($settings, $payload, $mode = 'draft')
     {
+        if (!empty($settings['_cluster']['assigned']) && empty($settings['_cluster']['effective'])) {
+            return 'Cụm phát hành hóa đơn của shop đang ở trạng thái ngừng hoặc ngoài thời gian hiệu lực.';
+        }
+
         if (empty($settings['supplier_tax_code'])) {
             return 'Thiếu MST nhà cung cấp trong cấu hình.';
         }

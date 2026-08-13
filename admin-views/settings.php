@@ -10,12 +10,20 @@ $is_multisite = is_multisite();
 
 <div class="container-fluid py-3" id="tgs-viettel-settings-root">
 
+    <?php
+    $cluster_view = TGS_VIETTEL_INVOICE_PLUGIN_DIR . 'admin-views/cluster-settings.php';
+    if (file_exists($cluster_view)) {
+        require $cluster_view;
+    }
+    ?>
+
     <?php if ($is_multisite): ?>
     <div class="alert alert-info">
         <h5 class="mb-2">Cấu hình đa site (Multisite)</h5>
         <div class="mb-0">
             <?php if ($is_super_admin): ?>
-            Phần <strong>"Cấu hình chung"</strong> được lưu chung cho toàn mạng. Phần <strong>"Cấu hình cửa hàng"</strong> riêng cho site này.
+            Phần <strong>"Cấu hình chung"</strong> được lưu chung cho toàn mạng. Phần <strong>"Cấu hình cửa
+                hàng"</strong> riêng cho site này.
             <?php else: ?>
             Cấu hình trong trang này được lưu riêng cho site hiện tại. Liên hệ Super Admin để thay đổi cấu hình chung.
             <?php endif; ?>
@@ -26,11 +34,12 @@ $is_multisite = is_multisite();
     <?php if (!$is_multisite || $is_super_admin): ?>
     <!-- COMMON SETTINGS (network-wide) -->
     <div class="card mb-3 border-primary">
-        <div class="card-header bg-primary text-white"><strong>Cấu hình chung</strong></div>
+        <div class="card-header bg-primary"><strong>Cấu hình mặc định/legacy toàn network</strong></div>
         <div class="card-body row g-3">
             <div class="col-md-8">
                 <label class="form-label">API base URL</label>
-                <input type="text" class="form-control" id="vi_api_base_url" value="<?php echo esc_attr($settings['api_base_url']); ?>">
+                <input type="text" class="form-control" id="vi_api_base_url"
+                    value="<?php echo esc_attr($settings['api_base_url']); ?>">
             </div>
             <div class="col-md-4">
                 <label class="form-label">Phương thức xác thực</label>
@@ -41,37 +50,47 @@ $is_multisite = is_multisite();
             </div>
             <div class="col-md-6">
                 <label class="form-label">Tên đăng nhập</label>
-                <input type="text" class="form-control" id="vi_username" value="<?php echo esc_attr($settings['username']); ?>">
+                <input type="text" class="form-control" id="vi_username"
+                    value="<?php echo esc_attr($settings['username']); ?>">
             </div>
             <div class="col-md-6">
                 <label class="form-label">Mật khẩu</label>
-                <input type="text" class="form-control" id="vi_password" value="<?php echo esc_attr(!empty($settings['password']) ? '********' : ''); ?>" placeholder="Nhập mới hoặc để ******** để giữ nguyên">
+                <input type="text" class="form-control" id="vi_password"
+                    value="<?php echo esc_attr(!empty($settings['password']) ? '********' : ''); ?>"
+                    placeholder="Nhập mới hoặc để ******** để giữ nguyên">
             </div>
             <div class="col-md-12">
                 <label class="form-label">Access token</label>
-                <input type="text" class="form-control" id="vi_access_token" value="<?php echo esc_attr(!empty($settings['access_token']) ? '********' : ''); ?>" placeholder="Dùng khi auth_mode = token">
+                <input type="text" class="form-control" id="vi_access_token"
+                    value="<?php echo esc_attr(!empty($settings['access_token']) ? '********' : ''); ?>"
+                    placeholder="Dùng khi auth_mode = token">
             </div>
             <div class="col-md-12">
                 <div class="form-check mt-2">
-                    <input class="form-check-input" type="checkbox" id="vi_verify_ssl" <?php checked((int) $settings['verify_ssl'], 1); ?>>
+                    <input class="form-check-input" type="checkbox" id="vi_verify_ssl"
+                        <?php checked((int) $settings['verify_ssl'], 1); ?>>
                     <label class="form-check-label" for="vi_verify_ssl">Bật SSL verify</label>
                 </div>
             </div>
             <div class="col-md-4">
                 <label class="form-label">Template code mặc định</label>
-                <input type="text" class="form-control" id="vi_default_template_code" value="<?php echo esc_attr($settings['default_template_code']); ?>">
+                <input type="text" class="form-control" id="vi_default_template_code"
+                    value="<?php echo esc_attr($settings['default_template_code']); ?>">
             </div>
             <div class="col-md-4">
                 <label class="form-label">Invoice series mặc định</label>
-                <input type="text" class="form-control" id="vi_default_invoice_series" value="<?php echo esc_attr($settings['default_invoice_series']); ?>">
+                <input type="text" class="form-control" id="vi_default_invoice_series"
+                    value="<?php echo esc_attr($settings['default_invoice_series']); ?>">
             </div>
             <div class="col-md-4">
                 <label class="form-label">Phương thức thanh toán mặc định</label>
-                <input type="text" class="form-control" id="vi_default_payment_method" value="<?php echo esc_attr($settings['default_payment_method']); ?>">
+                <input type="text" class="form-control" id="vi_default_payment_method"
+                    value="<?php echo esc_attr($settings['default_payment_method']); ?>">
             </div>
             <div class="col-md-6">
                 <div class="form-check mt-2">
-                    <input class="form-check-input" type="checkbox" id="vi_auto_enabled" <?php checked((int) $settings['auto_enabled'], 1); ?>>
+                    <input class="form-check-input" type="checkbox" id="vi_auto_enabled"
+                        <?php checked((int) $settings['auto_enabled'], 1); ?>>
                     <label class="form-check-label" for="vi_auto_enabled">Tự động tạo hóa đơn khi sale completed</label>
                 </div>
                 <select class="form-select mt-2" id="vi_auto_mode">
@@ -107,11 +126,14 @@ $is_multisite = is_multisite();
                 </div>
             </div>
             <label class="form-label">Nhập JSON</label>
-            <textarea class="form-control font-monospace" id="vi_import_json" rows="8" placeholder="Dán JSON đã xuất vào đây"></textarea>
+            <textarea class="form-control font-monospace" id="vi_import_json" rows="8"
+                placeholder="Dán JSON đã xuất vào đây"></textarea>
             <div class="d-flex gap-2 mt-2">
-                <button type="button" class="btn btn-outline-primary" id="vi_import_settings">Nhập vào cửa hàng hiện tại</button>
+                <button type="button" class="btn btn-outline-primary" id="vi_import_settings">Nhập vào cửa hàng hiện
+                    tại</button>
                 <?php if ($is_super_admin): ?>
-                <button type="button" class="btn btn-outline-danger" id="vi_import_common_settings">Nhập vào common</button>
+                <button type="button" class="btn btn-outline-danger" id="vi_import_common_settings">Nhập vào
+                    common</button>
                 <?php endif; ?>
             </div>
             <div class="small text-muted mt-2">Tự động nhận dạng định dạng JSON (v1 flat, v2 common/shop).</div>

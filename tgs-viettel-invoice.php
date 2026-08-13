@@ -72,11 +72,14 @@ class TGS_Viettel_Invoice_Plugin
         add_action('wp_ajax_nopriv_tgs_viettel_pos_preview_invoice_pdf', [$this, 'ajax_pos_preview_invoice_pdf']);
         add_action('wp_ajax_tgs_viettel_get_sale_debug_log', [$this, 'ajax_get_sale_debug_log']);
         add_action('wp_ajax_tgs_viettel_pos_list_statuses', [$this, 'ajax_pos_list_statuses']);
+        add_action('wp_ajax_nopriv_tgs_viettel_pos_list_statuses', [$this, 'ajax_pos_list_statuses']);
+        add_action('wp_ajax_tgs_viettel_pos_debug_statuses_context', [$this, 'ajax_pos_debug_statuses_context']);
+        add_action('wp_ajax_nopriv_tgs_viettel_pos_debug_statuses_context', [$this, 'ajax_pos_debug_statuses_context']);
         add_action('wp_ajax_tgs_viettel_pos_get_items_for_review', [$this, 'ajax_pos_get_items_for_review']);
         add_action('wp_ajax_nopriv_tgs_viettel_pos_get_items_for_review', [$this, 'ajax_pos_get_items_for_review']);
         add_action('wp_ajax_tgs_viettel_pos_update_danger_flags', [$this, 'ajax_pos_update_danger_flags']);
         add_action('wp_ajax_nopriv_tgs_viettel_pos_update_danger_flags', [$this, 'ajax_pos_update_danger_flags']);
-        add_action('wp_ajax_tgs_viettel_lookup_customer_by_tax_code', [$this, 'ajax_lookup_customer_by_tax_code']);
+
 
         /*
          * Nút "Gửi lên cục thuế" trên popup in bill POS — lối gửi BẰNG TAY cho
@@ -104,6 +107,120 @@ class TGS_Viettel_Invoice_Plugin
         if (is_admin() && !wp_doing_ajax()) {
             add_action('admin_init', [$this, 'run_migration']);
         }
+    }
+
+    private function current_user_can_use_pos()
+    {
+        if (!class_exists('TGS_POS_Permission')) {
+            $permission_file = WP_PLUGIN_DIR . '/tgs_pos/includes/class-tgs-pos-permission.php';
+            if (file_exists($permission_file)) {
+                require_once $permission_file;
+            }
+        }
+
+        if (class_exists('TGS_POS_Permission')) {
+            return TGS_POS_Permission::current_user_can_use_pos();
+        }
+
+        if (!is_user_logged_in()) {
+            return false;
+        }
+
+        $user_id = get_current_user_id();
+        $blog_id = get_current_blog_id();
+
+        if ($user_id > 0 && $blog_id > 0 && class_exists('TGS_POS_Site_Permission')) {
+            $manager = TGS_POS_Site_Permission::get_instance();
+            if ($manager && method_exists($manager, 'is_permission_enabled') && method_exists($manager, 'user_can_access_pos_site')) {
+                if (!$manager->is_permission_enabled($blog_id)) {
+                    return true;
+                }
+
+                if ($manager->user_can_access_pos_site($user_id, $blog_id)) {
+                    return true;
+                }
+            }
+        }
+
+        return current_user_can('read') || current_user_can('edit_posts') || current_user_can('manage_options');
+    }
+
+    private function bootstrap_requested_blog_context()
+    {
+        if (!is_multisite()) {
+            return;
+        }
+
+        $requested_blog_id = intval($_REQUEST['blog_id'] ?? 0);
+        if ($requested_blog_id <= 0 || $requested_blog_id === get_current_blog_id()) {
+            return;
+        }
+
+        if (get_blog_details($requested_blog_id)) {
+            switch_to_blog($requested_blog_id);
+        }
+    }
+
+    private function get_pos_statuses_debug_context()
+    {
+        global $wpdb;
+
+        $user = wp_get_current_user();
+        $user_id = $user instanceof WP_User ? (int) $user->ID : 0;
+        $blog_id = get_current_blog_id();
+        $caps_meta_key = $wpdb->get_blog_prefix($blog_id) . 'capabilities';
+        $caps_meta = $user_id > 0 ? get_user_meta($user_id, $caps_meta_key, true) : [];
+        $permission_file = WP_PLUGIN_DIR . '/tgs_pos/includes/class-tgs-pos-permission.php';
+        $site_permission_enabled = null;
+        $site_permission_result = null;
+
+        if (class_exists('TGS_POS_Site_Permission')) {
+            $manager = TGS_POS_Site_Permission::get_instance();
+            if ($manager && method_exists($manager, 'is_permission_enabled')) {
+                $site_permission_enabled = $manager->is_permission_enabled($blog_id) ? 1 : 0;
+            }
+            if ($manager && method_exists($manager, 'user_can_access_pos_site')) {
+                $site_permission_result = $manager->user_can_access_pos_site($user_id, $blog_id) ? 1 : 0;
+            }
+        }
+
+        return [
+            'time' => current_time('mysql'),
+            'request' => [
+                'action' => sanitize_text_field($_REQUEST['action'] ?? ''),
+                'requested_blog_id' => intval($_REQUEST['blog_id'] ?? 0),
+                'date_from' => sanitize_text_field($_REQUEST['date_from'] ?? ''),
+                'date_to' => sanitize_text_field($_REQUEST['date_to'] ?? ''),
+                'status' => sanitize_text_field($_REQUEST['status'] ?? ''),
+                'age_filter' => sanitize_text_field($_REQUEST['age_filter'] ?? ''),
+            ],
+            'site' => [
+                'is_multisite' => is_multisite() ? 1 : 0,
+                'current_blog_id' => $blog_id,
+                'caps_meta_key' => $caps_meta_key,
+            ],
+            'user' => [
+                'id' => $user_id,
+                'login' => $user instanceof WP_User ? (string) $user->user_login : '',
+                'roles' => $user instanceof WP_User && is_array($user->roles) ? array_values($user->roles) : [],
+                'caps_meta' => is_array($caps_meta) ? $caps_meta : [],
+                'is_logged_in' => is_user_logged_in() ? 1 : 0,
+                'can_read' => current_user_can('read') ? 1 : 0,
+                'can_edit_posts' => current_user_can('edit_posts') ? 1 : 0,
+                'can_manage_options' => current_user_can('manage_options') ? 1 : 0,
+                'pos_permission_class_loaded' => class_exists('TGS_POS_Permission') ? 1 : 0,
+                'pos_permission_file_exists' => file_exists($permission_file) ? 1 : 0,
+                'current_user_can_use_pos' => $this->current_user_can_use_pos() ? 1 : 0,
+                'site_permission_enabled' => $site_permission_enabled,
+                'site_permission_result' => $site_permission_result,
+            ],
+            'constants' => [
+                'invoice_table_defined' => defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE') ? 1 : 0,
+                'ledger_table_defined' => defined('TGS_TABLE_LOCAL_LEDGER') ? 1 : 0,
+                'invoice_table' => defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE') ? TGS_TABLE_LOCAL_VIETTEL_INVOICE : '',
+                'ledger_table' => defined('TGS_TABLE_LOCAL_LEDGER') ? TGS_TABLE_LOCAL_LEDGER : '',
+            ],
+        ];
     }
 
     public function register_routes($routes)
@@ -649,6 +766,7 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_get_sale_debug_log()
     {
+        $this->bootstrap_requested_blog_context();
         $nonce = sanitize_text_field($_POST['nonce'] ?? '');
         if (
             empty($nonce)
@@ -658,9 +776,14 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
+<<<<<<< HEAD
+        if (!$this->current_user_can_use_pos()) {
+            wp_send_json_error(['message' => 'Bạn không có quyền xem nhật ký.'], 403);
+=======
         // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
         if (!is_user_logged_in()) {
             wp_send_json_error(['message' => 'Bạn cần đăng nhập để xem nhật ký.'], 403);
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             return;
         }
 
@@ -776,6 +899,7 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_pos_list_statuses()
     {
+        $this->bootstrap_requested_blog_context();
         $nonce = sanitize_text_field($_POST['nonce'] ?? '');
         if (
             empty($nonce)
@@ -785,9 +909,14 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
+<<<<<<< HEAD
+        if (!$this->current_user_can_use_pos()) {
+            wp_send_json_error(['message' => 'Bạn không có quyền xem danh sách.'], 403);
+=======
         // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
         if (!is_user_logged_in()) {
             wp_send_json_error(['message' => 'Bạn cần đăng nhập để xem danh sách.'], 403);
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             return;
         }
 
@@ -958,12 +1087,34 @@ class TGS_Viettel_Invoice_Plugin
         ]);
     }
 
+    public function ajax_pos_debug_statuses_context()
+    {
+        $this->bootstrap_requested_blog_context();
+
+        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+        if (
+            empty($nonce)
+            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
+        ) {
+            wp_send_json_error([
+                'message' => 'Nonce không hợp lệ.',
+                'debug' => $this->get_pos_statuses_debug_context(),
+            ], 403);
+            return;
+        }
+
+        wp_send_json_success([
+            'debug' => $this->get_pos_statuses_debug_context(),
+        ]);
+    }
+
     /**
      * POS: Lấy danh sách item của đơn bán để review trước khi gửi CQT.
      * Trả về gift_items, has_under24_main, under24_main_skus.
      */
     public function ajax_pos_get_items_for_review()
     {
+        $this->bootstrap_requested_blog_context();
         global $wpdb;
 
         $nonce = sanitize_text_field($_REQUEST['nonce'] ?? '');
@@ -1042,14 +1193,23 @@ class TGS_Viettel_Invoice_Plugin
         $sku_sql = $has_local_product_sku ? ', i.local_product_sku' : ", '' AS local_product_sku";
         $has_tax_percent = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_tax_percent');
         $tax_percent_sql = $has_tax_percent ? ', i.local_ledger_item_tax_percent' : ', 0 AS local_ledger_item_tax_percent';
+        $has_discount_amount = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_discount_amount');
+        $discount_amount_sql = $has_discount_amount ? ', i.local_ledger_item_discount_amount' : ', 0 AS local_ledger_item_discount_amount';
+        $has_tax_amount = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_tax_amount');
+        $tax_amount_sql = $has_tax_amount ? ', i.local_ledger_item_tax_amount' : ', 0 AS local_ledger_item_tax_amount';
 
         $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
         $rows = $wpdb->get_results(
             $wpdb->prepare(
                 'SELECT i.local_ledger_item_id, i.local_product_name_id,
                         i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price,
+<<<<<<< HEAD
+                        i.local_ledger_item_discount, i.local_ledger_item_discount_type'
+                        . $tax_percent_sql . $discount_amount_sql . $tax_amount_sql . $danger_col_sql . $pad_col_sql . $global_id_sql . $sku_sql . '
+=======
                         i.local_ledger_item_discount_amount'
                         . $tax_percent_sql . $danger_col_sql . $pad_col_sql . $global_id_sql . $sku_sql . '
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  WHERE i.local_ledger_item_id IN (' . $placeholders . ')
                  ORDER BY i.local_ledger_item_id ASC',
@@ -1104,6 +1264,11 @@ class TGS_Viettel_Invoice_Plugin
             $sku = (string) ($row['local_product_sku'] ?? '');
             $danger = $has_danger_col ? intval($row['local_ledger_item_is_under24_promo_danger'] ?? 0) : 0;
 
+<<<<<<< HEAD
+            $disc_value = floatval($row['local_ledger_item_discount'] ?? 0);
+            $disc_type = (string) ($row['local_ledger_item_discount_type'] ?? '');
+            $disc_amount = floatval($row['local_ledger_item_discount_amount'] ?? 0);
+=======
             /*
              * CK% suy từ tiền chiết khấu — hai cột discount / discount_type đã
              * ngừng ghi, và trên dữ liệu cũ cột `discount` còn lẫn lộn giữa
@@ -1113,8 +1278,10 @@ class TGS_Viettel_Invoice_Plugin
                 ? TGS_Money::discount_percent_of($row, $row['local_ledger_item_discount'] ?? 0)
                 : floatval($row['local_ledger_item_discount'] ?? 0);
             $disc_type = $disc_value > 0 ? 'percent' : '';
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             $price_after_disc = $has_pad_col ? floatval($row['local_ledger_item_price_after_discount'] ?? $row['price']) : floatval($row['price']);
             $tax_percent = floatval($row['local_ledger_item_tax_percent'] ?? 0);
+            $tax_amount = floatval($row['local_ledger_item_tax_amount'] ?? 0);
 
             // Phát hiện SKU kết thúc bằng chữ Z (case-insensitive).
             // Ghi chú: phần mềm nghiệp vụ bên ngoài đang đặt đuôi Z cho các KM đặc biệt,
@@ -1130,8 +1297,10 @@ class TGS_Viettel_Invoice_Plugin
                 'price'                   => floatval($row['price']),
                 'discount_value'          => $disc_value,
                 'discount_type'           => $disc_type,
+                'discount_amount'         => $disc_amount,
                 'price_after_discount'    => $price_after_disc,
                 'tax_percent'             => $tax_percent,
+                'tax_amount'              => $tax_amount,
                 'is_gift'                 => $is_gift,
                 'is_under24_promo_danger' => $danger,
                 'is_sku_ends_z'           => $is_sku_ends_z,
@@ -1183,6 +1352,7 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_pos_update_danger_flags()
     {
+        $this->bootstrap_requested_blog_context();
         global $wpdb;
 
         $nonce = sanitize_text_field($_REQUEST['nonce'] ?? '');
@@ -1247,6 +1417,7 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_pos_retry_invoice()
     {
+        $this->bootstrap_requested_blog_context();
         $nonce = sanitize_text_field($_POST['nonce'] ?? '');
         if (
             empty($nonce)
@@ -1256,9 +1427,14 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
+<<<<<<< HEAD
+        if (!$this->current_user_can_use_pos()) {
+            wp_send_json_error(['message' => 'Bạn không có quyền gửi lại hóa đơn.'], 403);
+=======
         // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
         if (!is_user_logged_in()) {
             wp_send_json_error(['message' => 'Bạn cần đăng nhập để gửi lại hóa đơn.'], 403);
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             return;
         }
 
@@ -1439,6 +1615,7 @@ class TGS_Viettel_Invoice_Plugin
      */
     public function ajax_pos_send_invoice_email()
     {
+        $this->bootstrap_requested_blog_context();
         $nonce = sanitize_text_field($_POST['nonce'] ?? '');
         if (
             empty($nonce)
@@ -1448,9 +1625,14 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
+<<<<<<< HEAD
+        if (!$this->current_user_can_use_pos()) {
+            wp_send_json_error(['message' => 'Bạn không có quyền gửi email hóa đơn.'], 403);
+=======
         // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
         if (!is_user_logged_in()) {
             wp_send_json_error(['message' => 'Bạn cần đăng nhập để gửi email hóa đơn.'], 403);
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             return;
         }
 
@@ -1709,6 +1891,8 @@ class TGS_Viettel_Invoice_Plugin
         ]);
     }
 
+<<<<<<< HEAD
+=======
     public function ajax_lookup_customer_by_tax_code()
     {
         $nonce = sanitize_text_field($_POST['nonce'] ?? '');
@@ -1769,12 +1953,14 @@ class TGS_Viettel_Invoice_Plugin
             'message'   => count($customers) > 0 ? 'Tìm thấy ' . count($customers) . ' khách hàng.' : 'Không tìm thấy khách hàng nào.',
         ]);
     }
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
 
     /**
      * POS: xem trực tiếp PDF hóa đơn trong trình duyệt.
      */
     public function ajax_pos_preview_invoice_pdf()
     {
+        $this->bootstrap_requested_blog_context();
         $nonce = sanitize_text_field($_POST['nonce'] ?? '');
         if (
             empty($nonce)
@@ -1784,9 +1970,14 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
+<<<<<<< HEAD
+        if (!$this->current_user_can_use_pos()) {
+            wp_send_json_error(['message' => 'Bạn không có quyền xem PDF hóa đơn.'], 403);
+=======
         // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
         if (!is_user_logged_in()) {
             wp_send_json_error(['message' => 'Bạn cần đăng nhập để xem PDF hóa đơn.'], 403);
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
             return;
         }
 
@@ -2581,6 +2772,7 @@ class TGS_Viettel_Invoice_Plugin
          */
         public function ajax_send_from_sale()
         {
+            $this->bootstrap_requested_blog_context();
             $nonce = sanitize_text_field($_POST['nonce'] ?? '');
             if (
                 empty($nonce)
@@ -2590,9 +2782,14 @@ class TGS_Viettel_Invoice_Plugin
                 return;
             }
 
+<<<<<<< HEAD
+            if (!$this->current_user_can_use_pos()) {
+                wp_send_json_error(['message' => 'Bạn không có quyền thực hiện thao tác này.'], 403);
+=======
             // Kiểm tra user đã đăng nhập (POS page đã yêu cầu login ở template level)
             if (!is_user_logged_in()) {
                 wp_send_json_error(['message' => 'Bạn cần đăng nhập để thực hiện thao tác này.'], 403);
+>>>>>>> ba350d80664e8825a273244829564c5c49aa2bdc
                 return;
             }
 

@@ -1059,7 +1059,17 @@ class TGS_Viettel_Invoice_Plugin
                     $defaults = self::get_default_settings();
                     $row['template_code'] = $defaults['default_template_code'] ?? '1/1156';
                 }
-                $row['contains_under24_main_item'] = !empty($under24_flags[intval($row['sale_ledger_id'] ?? 0)]) ? 1 : 0;
+                $sale_id_for_flags = intval($row['sale_ledger_id'] ?? 0);
+                $row['contains_under24_main_item'] = !empty($under24_flags['under24'][$sale_id_for_flags]) ? 1 : 0;
+                // Đơn toàn mã Z, hoặc chính là phiếu tách <mã>Z ⇒ không gửi thuế
+                $row['is_promo_only'] = !empty($under24_flags['promo_only'][$sale_id_for_flags]) ? 1 : 0;
+                // CÓ BẤT KỲ dòng mã Z nào là khoá gửi thuế — hàng mã Z phải nằm
+                // ở phiếu tách, còn sót trong phiếu chính là phải xem lại.
+                $row['has_promo_item'] = !empty($under24_flags['has_promo'][$sale_id_for_flags]) ? 1 : 0;
+                $row['promo_skus'] = array_values((array) ($under24_flags['promo_skus'][$sale_id_for_flags] ?? []));
+                $row['is_promo_split_ticket'] = TGS_Viettel_Invoice_Flow_Service::is_promo_split_sale_code(
+                    (string) ($row['local_ledger_code'] ?? '')
+                ) ? 1 : 0;
                 $row['age_group'] = !empty($row['contains_under24_main_item']) ? 'under24' : 'over24';
                 $row['row_key'] = 'sale:' . intval($row['sale_ledger_id'] ?? 0);
                 $row['document_type'] = 'sale';
@@ -1487,7 +1497,7 @@ class TGS_Viettel_Invoice_Plugin
             // Phát hiện SKU kết thúc bằng chữ Z (case-insensitive).
             // Ghi chú: phần mềm nghiệp vụ bên ngoài đang đặt đuôi Z cho các KM đặc biệt,
             // hệ thống fill sẵn "loại bỏ" để an toàn — nhân viên vẫn có thể bỏ tích nếu cần.
-            $is_sku_ends_z = $is_gift && $sku !== '' && strtoupper(substr(rtrim($sku), -1)) === 'Z';
+            $is_sku_ends_z = TGS_Viettel_Invoice_Flow_Service::is_promo_split_sku($sku);
 
             $item = [
                 'item_id'                 => intval($row['local_ledger_item_id']),
@@ -2988,14 +2998,25 @@ class TGS_Viettel_Invoice_Plugin
         ]));
     }
 
+    /**
+     * Quét item của các dòng trong danh sách, trả về hai cờ cho mỗi phiếu bán:
+     *
+     *   under24    — có hàng chính dưới 24 tháng
+     *   promo_only — TOÀN BỘ dòng là hàng mã Z ⇒ không phát hành hoá đơn được
+     *
+     * Gộp vào một vòng quét vì cả hai đều cần đúng danh sách item đó; tách ra
+     * là nhân đôi truy vấn cho mỗi lần mở danh sách.
+     */
     private function compute_under24_main_flags_for_sale_rows($rows)
     {
+        $empty_result = ['under24' => [], 'promo_only' => []];
+
         if (
             !is_array($rows)
             || empty($rows)
             || !defined('TGS_TABLE_LOCAL_LEDGER_ITEM')
         ) {
-            return [];
+            return $empty_result;
         }
 
         global $wpdb;
@@ -3018,7 +3039,7 @@ class TGS_Viettel_Invoice_Plugin
 
         $all_item_ids = array_values(array_unique(array_filter(array_map('intval', $all_item_ids))));
         if (empty($all_item_ids)) {
-            return [];
+            return $empty_result;
         }
 
         $has_global_product_name_id = $this->flow_service->local_ledger_item_column_exists('global_product_name_id');
@@ -3044,7 +3065,7 @@ class TGS_Viettel_Invoice_Plugin
         }
 
         if (empty($items)) {
-            return [];
+            return $empty_result;
         }
 
         $item_info_map = [];
@@ -3062,9 +3083,43 @@ class TGS_Viettel_Invoice_Plugin
             }
         }
 
+        /*
+         * Đơn toàn mã Z: mọi dòng đều là SKU đuôi Z. Những đơn này KHÔNG phát
+         * hành hoá đơn được (xem filter_and_sort_items_for_tax), nên danh sách
+         * phải khoá nút gửi lại thay vì để nhân viên bấm rồi nhận lỗi.
+         */
+        $promo_only_flags = [];
+        $has_promo_flags = [];
+        $promo_sku_map = [];
+        foreach ($sale_item_map as $sale_ledger_id => $item_ids) {
+            $counted = 0;
+            $promo_skus = [];
+            foreach ($item_ids as $item_id) {
+                $item_info = $item_info_map[$item_id] ?? null;
+                if (!$item_info) {
+                    continue;
+                }
+                $counted++;
+                $sku = (string) ($item_info['sku'] ?? '');
+                if (TGS_Viettel_Invoice_Flow_Service::is_promo_split_sku($sku)) {
+                    $promo_skus[] = $sku;
+                }
+            }
+
+            $promo_skus = array_values(array_unique(array_filter($promo_skus)));
+            $promo_only_flags[$sale_ledger_id] = $counted > 0 && count($promo_skus) === $counted;
+            $has_promo_flags[$sale_ledger_id] = !empty($promo_skus);
+            $promo_sku_map[$sale_ledger_id] = $promo_skus;
+        }
+
         $main_skus = array_values(array_unique($main_skus));
         if (empty($main_skus)) {
-            return [];
+            return [
+                'under24' => [],
+                'promo_only' => $promo_only_flags,
+                'has_promo' => $has_promo_flags,
+                'promo_skus' => $promo_sku_map,
+            ];
         }
 
         $under24_rows = class_exists('TGS_Viettel_Invoice_Global_Products')
@@ -3088,7 +3143,12 @@ class TGS_Viettel_Invoice_Plugin
             }
         }
 
-        return $sale_flags;
+        return [
+            'under24' => $sale_flags,
+            'promo_only' => $promo_only_flags,
+            'has_promo' => $has_promo_flags,
+            'promo_skus' => $promo_sku_map,
+        ];
     }
 
     private function insert_invoice_record($data)

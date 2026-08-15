@@ -73,6 +73,28 @@ class TGS_Viettel_Invoice_Flow_Service
      * @return string Tên lớp, hoặc chuỗi rỗng nếu không có bản nào.
      */
     /**
+     * Mặt hàng mã Z — KHÔNG được kèm lên hoá đơn thuế.
+     *
+     * Quy ước lấy thẳng từ TGS_POS_Order_Handler để hai plugin không hiểu khác
+     * nhau. ⚠️ KHÔNG phụ thuộc cờ "hàng tặng": mã Z bán ra như hàng thường
+     * (bán bù quà hỏng, đổi quà) vẫn là mã Z và vẫn không được lên hoá đơn.
+     * Bản cũ đòi phải là hàng tặng nên đơn toàn mã Z bán thường đã lọt lên CQT.
+     */
+    public static function is_promo_split_sku($sku)
+    {
+        $sku = strtoupper(trim((string) $sku));
+        if ($sku === '') {
+            return false;
+        }
+
+        if (class_exists('TGS_POS_Order_Handler')) {
+            return (bool) TGS_POS_Order_Handler::is_promo_split_sku($sku);
+        }
+
+        return substr($sku, -1) === 'Z';
+    }
+
+    /**
      * Mã phiếu này có phải phiếu tách hàng khuyến mãi (mã Z) không.
      *
      * Đọc thẳng quy ước từ TGS_POS_Order_Handler khi có, để hai plugin không
@@ -383,6 +405,56 @@ class TGS_Viettel_Invoice_Flow_Service
         $gift_items = [];
         $under24_main_skus = [];
 
+        /*
+         * ═══════════════════════════════════════════════════════════════════
+         * CHỐT CHẶN CUỐI: CÓ MÃ Z TRONG ĐƠN LÀ KHÔNG PHÁT HÀNH HOÁ ĐƠN
+         * ═══════════════════════════════════════════════════════════════════
+         *
+         * Bình thường hàng mã Z đã được tách sang phiếu riêng ngay lúc thanh
+         * toán, nên phiếu đi lên thuế KHÔNG được còn dòng mã Z nào. Còn sót
+         * nghĩa là có gì đó bất thường (đơn cũ chưa tách, hoặc dòng mã Z lọt
+         * vào phiếu chính) — lúc đó DỪNG CẢ ĐƠN để người ta xem lại, chứ không
+         * lặng lẽ bỏ dòng đó ra rồi vẫn phát hành.
+         *
+         * Vì sao chặt tay: hoá đơn phát hành rồi không thu hồi được, phải làm
+         * hoá đơn điều chỉnh/thay thế và giải trình. Dừng lại một lần rẻ hơn
+         * nhiều so với khai nhầm hàng cấm tặng kèm lên cơ quan thuế.
+         *
+         * Cần gửi thật thì bật filter, không phải sửa luồng:
+         *   add_filter('tgs_pos_send_promo_split_to_tax', '__return_true');
+         */
+        $promo_skus = [];
+        $countable_lines = 0;
+        foreach ($items as $item) {
+            if (!empty($item['is_under24_promo_danger'])) {
+                continue;
+            }
+
+            $countable_lines++;
+            if (self::is_promo_split_sku($item['sku'] ?? '')) {
+                $promo_skus[] = (string) ($item['sku'] ?? '');
+            }
+        }
+
+        if (!empty($promo_skus)
+            && !apply_filters('tgs_pos_send_promo_split_to_tax', false, '', $items)) {
+            $promo_skus = array_values(array_unique(array_filter($promo_skus)));
+            $is_promo_only = count($promo_skus) > 0 && $countable_lines === count($promo_skus);
+
+            return [
+                'success' => false,
+                'is_promo_only_sale' => $is_promo_only,
+                'has_promo_item' => true,
+                'promo_skus' => $promo_skus,
+                'message' => $is_promo_only
+                    ? 'Đơn này chỉ có hàng mã Z (' . implode(', ', array_slice($promo_skus, 0, 5))
+                        . ') — không phát hành hoá đơn thuế. Bill vẫn in bình thường cho khách.'
+                    : 'Phát hiện mã hàng đuôi Z trong đơn (' . implode(', ', array_slice($promo_skus, 0, 5))
+                        . '). Hàng mã Z phải nằm ở phiếu tách riêng, không được kèm lên hoá đơn thuế — '
+                        . 'kiểm tra lại đơn này trước khi gửi.',
+            ];
+        }
+
         foreach ($items as $item) {
             if (!empty($item['is_under24_promo_danger'])) {
                 continue;
@@ -461,6 +533,13 @@ class TGS_Viettel_Invoice_Flow_Service
 
         foreach ($main_under24 as $item) {
             $sorted_items[] = $item;
+        }
+
+        if (empty($sorted_items)) {
+            return [
+                'success' => false,
+                'message' => 'Không còn dòng hàng nào được phép khai trên hoá đơn của đơn này.',
+            ];
         }
 
         return [

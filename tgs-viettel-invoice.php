@@ -2009,7 +2009,7 @@ class TGS_Viettel_Invoice_Plugin
             }
         }
 
-        $sale_code = sanitize_text_field($latest['local_ledger_code'] ?? ('Sale #' . $sale_ledger_id));
+        $sale_code = sanitize_text_field($latest['local_ledger_code'] ?? 'Đơn hàng');
         $issued_at = current_time('d/m/Y H:i:s');
         $invoice_search_url = 'https://vinvoice.viettel.vn/utilities/invoice-search';
         $quick_view_url = $invoice_search_url;

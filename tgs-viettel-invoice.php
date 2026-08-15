@@ -161,7 +161,7 @@ class TGS_Viettel_Invoice_Plugin
         return current_user_can('read') || current_user_can('edit_posts') || current_user_can('manage_options');
     }
 
-    private function bootstrap_requested_blog_context()
+    public function bootstrap_requested_blog_context()
     {
         if (!is_multisite()) {
             return;
@@ -969,6 +969,7 @@ class TGS_Viettel_Invoice_Plugin
 
         $status_filter = isset($_POST['status']) ? sanitize_text_field(wp_unslash($_POST['status'])) : 'all';
         $age_filter    = isset($_POST['age_filter']) ? sanitize_text_field(wp_unslash($_POST['age_filter'])) : 'all';
+        $document_filter = isset($_POST['document_type']) ? sanitize_key(wp_unslash($_POST['document_type'])) : 'all';
         $date_from     = isset($_POST['date_from']) ? sanitize_text_field(wp_unslash($_POST['date_from'])) : '';
         $date_to       = isset($_POST['date_to'])   ? sanitize_text_field(wp_unslash($_POST['date_to']))   : '';
 
@@ -993,6 +994,9 @@ class TGS_Viettel_Invoice_Plugin
                     vi.cqt_http_code,
                     vi.error_message,
                     vi.template_code,
+                    vi.total_before_tax,
+                    vi.total_tax_amount,
+                    vi.total_after_tax,
                     vi.issue_response_payload,
                     COALESCE(vi.updated_at, l.updated_at) AS updated_at,
                     COALESCE(vi.created_at, l.created_at) AS created_at
@@ -1057,6 +1061,18 @@ class TGS_Viettel_Invoice_Plugin
                 }
                 $row['contains_under24_main_item'] = !empty($under24_flags[intval($row['sale_ledger_id'] ?? 0)]) ? 1 : 0;
                 $row['age_group'] = !empty($row['contains_under24_main_item']) ? 'under24' : 'over24';
+                $row['row_key'] = 'sale:' . intval($row['sale_ledger_id'] ?? 0);
+                $row['document_type'] = 'sale';
+                $row['document_type_label'] = 'Hóa đơn bán';
+                $row['return_scope'] = '';
+                $row['return_scope_label'] = '';
+                $row['return_ledger_id'] = 0;
+                $row['queue_id'] = 0;
+                $row['sale_code'] = (string) ($row['local_ledger_code'] ?? '');
+                $row['original_invoice_no'] = '';
+                $row['total_before_tax'] = floatval($row['total_before_tax'] ?? 0);
+                $row['total_tax_amount'] = floatval($row['total_tax_amount'] ?? 0);
+                $row['total_after_tax'] = floatval($row['total_after_tax'] ?? 0);
                 $state = sanitize_text_field($row['invoice_state']);
 
                 $age_counts['all']++;
@@ -1100,7 +1116,8 @@ class TGS_Viettel_Invoice_Plugin
                     $matches_age = empty($row['contains_under24_main_item']);
                 }
 
-                $row['_matches_filters'] = $matches_status && $matches_age;
+                $matches_document = ($document_filter === 'all' || $document_filter === 'sale');
+                $row['_matches_filters'] = $matches_status && $matches_age && $matches_document;
                 unset($row['local_ledger_item_id']);
                 unset($row['issue_response_payload']);
             }
@@ -1116,9 +1133,156 @@ class TGS_Viettel_Invoice_Plugin
             unset($row);
         }
 
+        /*
+         * Phiếu hoàn là một chứng từ thuế độc lập. Không JOIN chúng vào dòng đơn bán vì
+         * một đơn có thể có nhiều lần hoàn; mỗi queue phải giữ một row_key riêng.
+         */
+        if ($document_filter !== 'sale' && $age_filter === 'all' && class_exists('TGS_Viettel_Invoice_Clusters')) {
+            $tables = TGS_Viettel_Invoice_Clusters::instance()->tables();
+            $return_table = (string) ($tables['return_adjustments'] ?? '');
+            $table_exists = $return_table !== '' && $wpdb->get_var($wpdb->prepare(
+                'SHOW TABLES LIKE %s',
+                $wpdb->esc_like($return_table)
+            )) === $return_table;
+
+            if ($table_exists) {
+                $return_sql = "SELECT
+                        q.id AS queue_id,
+                        q.return_ledger_id,
+                        q.sale_ledger_id,
+                        q.status AS queue_status,
+                        q.attempt_count,
+                        q.original_invoice_no,
+                        q.adjustment_invoice_no,
+                        q.error_message,
+                        q.request_payload,
+                        q.created_at,
+                        q.updated_at,
+                        r.local_ledger_code AS return_code,
+                        r.local_ledger_total_amount AS return_total_amount,
+                        s.local_ledger_code AS sale_code,
+                        original_vi.total_after_tax AS original_total_after_tax,
+                        adjustment_vi.issue_http_code,
+                        adjustment_vi.cqt_http_code,
+                        adjustment_vi.total_before_tax,
+                        adjustment_vi.total_tax_amount,
+                        adjustment_vi.total_after_tax
+                    FROM {$return_table} q
+                    LEFT JOIN " . TGS_TABLE_LOCAL_LEDGER . " r ON r.local_ledger_id = q.return_ledger_id
+                    LEFT JOIN " . TGS_TABLE_LOCAL_LEDGER . " s ON s.local_ledger_id = q.sale_ledger_id
+                    LEFT JOIN " . TGS_TABLE_LOCAL_VIETTEL_INVOICE . " original_vi
+                        ON original_vi.local_viettel_invoice_id = q.original_invoice_record_id
+                    LEFT JOIN " . TGS_TABLE_LOCAL_VIETTEL_INVOICE . " adjustment_vi
+                        ON adjustment_vi.local_viettel_invoice_id = q.adjustment_invoice_record_id
+                    WHERE q.blog_id = %d";
+                $return_args = [get_current_blog_id()];
+                if ($date_from) {
+                    $return_sql .= ' AND q.created_at >= %s';
+                    $return_args[] = $date_from . ' 00:00:00';
+                }
+                if ($date_to) {
+                    $return_sql .= ' AND q.created_at <= %s';
+                    $return_args[] = $date_to . ' 23:59:59';
+                }
+                $return_sql .= ' ORDER BY q.id DESC LIMIT %d';
+                $return_args[] = $limit;
+                $return_rows = $wpdb->get_results($wpdb->prepare($return_sql, $return_args), ARRAY_A);
+
+                foreach ((array) $return_rows as $return_row) {
+                    $queue_status = sanitize_key($return_row['queue_status'] ?? 'pending');
+                    $state = $queue_status === 'done'
+                        ? 'done'
+                        : ($queue_status === 'processing' ? 'pending' : $queue_status);
+
+                    $payload = json_decode((string) ($return_row['request_payload'] ?? ''), true);
+                    $summary = is_array($payload['summarizeInfo'] ?? null) ? $payload['summarizeInfo'] : [];
+                    $before = floatval($return_row['total_before_tax'] ?? 0);
+                    $tax = floatval($return_row['total_tax_amount'] ?? 0);
+                    $after = floatval($return_row['total_after_tax'] ?? 0);
+                    if ($before == 0.0 && isset($summary['totalAmountWithoutTax'])) {
+                        $before = floatval($summary['totalAmountWithoutTax']);
+                    }
+                    if ($tax == 0.0 && isset($summary['totalTaxAmount'])) {
+                        $tax = floatval($summary['totalTaxAmount']);
+                    }
+                    if ($after == 0.0 && isset($summary['totalAmountWithTax'])) {
+                        $after = floatval($summary['totalAmountWithTax']);
+                    }
+                    if ($after == 0.0) {
+                        $after = abs(floatval($return_row['return_total_amount'] ?? 0));
+                    }
+
+                    $original_total = abs(floatval($return_row['original_total_after_tax'] ?? 0));
+                    $scope = ($original_total > 0 && abs($after - $original_total) < 1)
+                        ? 'full'
+                        : 'partial';
+
+                    $matches_status = true;
+                    if ($status_filter === 'success') {
+                        $matches_status = ($state === 'done');
+                    } elseif ($status_filter === 'failed') {
+                        $matches_status = ($state === 'error');
+                    } elseif ($status_filter === 'pending') {
+                        $matches_status = in_array($state, ['pending', 'blocked'], true);
+                    } elseif ($status_filter === 'unsent') {
+                        $matches_status = in_array($state, ['pending', 'blocked'], true);
+                    }
+                    if (!$matches_status) {
+                        continue;
+                    }
+
+                    if ($state === 'done') {
+                        $status_counts['success']++;
+                    } elseif ($state === 'error') {
+                        $status_counts['failed']++;
+                    } else {
+                        $status_counts['pending']++;
+                    }
+                    $status_counts['all']++;
+
+                    $rows[] = [
+                        'row_key' => 'return_adjustment:' . intval($return_row['queue_id'] ?? 0),
+                        'document_type' => 'return_adjustment',
+                        'document_type_label' => 'Điều chỉnh giảm',
+                        'return_scope' => $scope,
+                        'return_scope_label' => $scope === 'full' ? 'Hoàn toàn bộ' : 'Hoàn một phần',
+                        'queue_id' => intval($return_row['queue_id'] ?? 0),
+                        'return_ledger_id' => intval($return_row['return_ledger_id'] ?? 0),
+                        'sale_ledger_id' => intval($return_row['sale_ledger_id'] ?? 0),
+                        'local_ledger_code' => (string) ($return_row['return_code'] ?? ''),
+                        'sale_code' => (string) ($return_row['sale_code'] ?? ''),
+                        'original_invoice_no' => (string) ($return_row['original_invoice_no'] ?? ''),
+                        'invoice_no' => (string) ($return_row['adjustment_invoice_no'] ?? ''),
+                        'invoice_state' => $state,
+                        'issue_status' => $state === 'done' ? 1 : 0,
+                        'send_cqt_status' => $state === 'done' ? 1 : 0,
+                        'issue_http_code' => intval($return_row['issue_http_code'] ?? 0),
+                        'cqt_http_code' => intval($return_row['cqt_http_code'] ?? 0),
+                        'error_message' => (string) ($return_row['error_message'] ?? ''),
+                        'contains_under24_main_item' => null,
+                        'age_group' => 'not_applicable',
+                        'total_before_tax' => -abs($before),
+                        'total_tax_amount' => -abs($tax),
+                        'total_after_tax' => -abs($after),
+                        'attempt_count' => intval($return_row['attempt_count'] ?? 0),
+                        'updated_at' => (string) ($return_row['updated_at'] ?? ''),
+                        'created_at' => (string) ($return_row['created_at'] ?? ''),
+                    ];
+                }
+            }
+        }
+
+        usort($rows, static function ($a, $b) {
+            $a_time = strtotime((string) ($a['updated_at'] ?? ($a['created_at'] ?? ''))) ?: 0;
+            $b_time = strtotime((string) ($b['updated_at'] ?? ($b['created_at'] ?? ''))) ?: 0;
+            return $b_time <=> $a_time;
+        });
+        $rows = array_slice($rows, 0, $limit);
+
         wp_send_json_success([
             'items'         => is_array($rows) ? $rows : [],
             'status_filter' => $status_filter,
+            'document_type_filter' => $document_filter,
             'age_filter'    => $age_filter,
             'date_from'     => $date_from,
             'date_to'       => $date_to,

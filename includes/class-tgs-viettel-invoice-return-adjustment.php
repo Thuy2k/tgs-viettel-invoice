@@ -29,6 +29,7 @@ class TGS_Viettel_Invoice_Return_Adjustment
         add_action('tgs_pos_return_committed', [$this, 'handle_return_committed'], 10, 2);
         add_action('wp_ajax_tgs_viettel_retry_return_adjustment', [$this, 'ajax_retry']);
         add_action('wp_ajax_tgs_viettel_confirm_return_adjustment', [$this, 'ajax_confirm']);
+        add_action('wp_ajax_tgs_viettel_preview_return_adjustment', [$this, 'ajax_preview']);
     }
 
     private function table()
@@ -688,6 +689,9 @@ class TGS_Viettel_Invoice_Return_Adjustment
 
     public function ajax_retry()
     {
+        if ($this->plugin && method_exists($this->plugin, 'bootstrap_requested_blog_context')) {
+            $this->plugin->bootstrap_requested_blog_context();
+        }
         $nonce = sanitize_text_field($_POST['nonce'] ?? '');
         if (!wp_verify_nonce($nonce, 'tgs_viettel_invoice_nonce') && !wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce')) {
             wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
@@ -707,8 +711,73 @@ class TGS_Viettel_Invoice_Return_Adjustment
         wp_send_json_error($result, 400);
     }
 
+    /**
+     * Trả dữ liệu preview cho danh sách thuế POS mà không phát hành hóa đơn.
+     * Việc gửi thật chỉ diễn ra sau khi người dùng xác nhận trong modal.
+     */
+    public function ajax_preview()
+    {
+        if ($this->plugin && method_exists($this->plugin, 'bootstrap_requested_blog_context')) {
+            $this->plugin->bootstrap_requested_blog_context();
+        }
+        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+        if (!wp_verify_nonce($nonce, 'tgs_viettel_invoice_nonce')
+            && !wp_verify_nonce($nonce, 'tgs_pos_nonce')
+            && !wp_verify_nonce($nonce, 'tmd_pos_nonce')) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+        }
+
+        $can_use_pos = class_exists('TGS_POS_Permission')
+            ? TGS_POS_Permission::current_user_can_use_pos()
+            : (is_user_logged_in() && current_user_can('read'));
+        if (!$can_use_pos) {
+            wp_send_json_error(['message' => 'Bạn không có quyền xem hóa đơn điều chỉnh.'], 403);
+        }
+
+        $queue_id = intval($_POST['queue_id'] ?? 0);
+        $queue = $queue_id > 0 ? $this->get_queue($queue_id) : [];
+        if (empty($queue)) {
+            wp_send_json_error(['message' => 'Không tìm thấy yêu cầu điều chỉnh của shop hiện tại.'], 404);
+        }
+
+        $original = $this->get_invoice_record(intval($queue['original_invoice_record_id'] ?? 0));
+        if (empty($original)
+            || intval($original['issue_status'] ?? 0) !== 1
+            || intval($original['send_cqt_status'] ?? 0) !== 1) {
+            $latest_original = $this->find_original_invoice(intval($queue['sale_ledger_id'] ?? 0));
+            if (!empty($latest_original)) {
+                $original = $latest_original;
+            }
+        }
+        if (empty($original)) {
+            wp_send_json_error(['message' => 'Không tìm thấy hóa đơn bán gốc để dựng preview.'], 404);
+        }
+
+        $built = $this->build_payload($queue, $original);
+        if (empty($built['success'])) {
+            wp_send_json_error([
+                'message' => (string) ($built['message'] ?? 'Không dựng được preview hóa đơn điều chỉnh.'),
+            ], 400);
+        }
+
+        $preview = $this->preview_result($queue_id, $original, $built);
+        if (($queue['status'] ?? '') === 'done') {
+            $preview['status'] = 'done';
+            $preview['invoice_no'] = (string) ($queue['adjustment_invoice_no'] ?? '');
+            $preview['message'] = 'Hóa đơn điều chỉnh giảm đã được gửi CQT thành công.';
+        } elseif (($queue['status'] ?? '') === 'blocked'
+            && (intval($original['issue_status'] ?? 0) !== 1 || intval($original['send_cqt_status'] ?? 0) !== 1)) {
+            $preview['status'] = 'blocked';
+            $preview['message'] = (string) ($queue['error_message'] ?? 'Hóa đơn gốc chưa sẵn sàng để điều chỉnh.');
+        }
+        wp_send_json_success($preview);
+    }
+
     public function ajax_confirm()
     {
+        if ($this->plugin && method_exists($this->plugin, 'bootstrap_requested_blog_context')) {
+            $this->plugin->bootstrap_requested_blog_context();
+        }
         $nonce = sanitize_text_field($_POST['nonce'] ?? '');
         if (!wp_verify_nonce($nonce, 'tgs_viettel_invoice_nonce')
             && !wp_verify_nonce($nonce, 'tgs_pos_nonce')

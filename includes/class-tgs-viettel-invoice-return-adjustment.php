@@ -236,6 +236,15 @@ class TGS_Viettel_Invoice_Return_Adjustment
             return ['id' => intval($queue_id), 'status' => 'blocked', 'message' => $message];
         }
 
+        // Đồng bộ lại số hóa đơn gốc cho cả queue cũ từng lưu nhầm chuỗi
+        // invoiceSeries + invoiceNo (ví dụ K23TXMK26TXM2422).
+        $correct_original_invoice_no = $this->original_invoice_id($original);
+        if ($correct_original_invoice_no !== ''
+            && $correct_original_invoice_no !== (string) ($queue['original_invoice_no'] ?? '')) {
+            $queue['original_invoice_no'] = $correct_original_invoice_no;
+            $this->update_queue($queue_id, ['original_invoice_no' => $correct_original_invoice_no]);
+        }
+
         // Không tự phát hành lại khi lần trước đã issue thành công nhưng gửi CQT lỗi.
         $adjustment_record_id = intval($queue['adjustment_invoice_record_id'] ?? 0);
         if ($adjustment_record_id > 0) {
@@ -612,10 +621,12 @@ class TGS_Viettel_Invoice_Return_Adjustment
                 intval($original['local_viettel_invoice_id'] ?? 0)
             );
         }
-        $series = trim((string) ($original['invoice_series'] ?? ''));
-        if ($number !== '' && $series !== '' && strpos($number, $series) !== 0) {
-            return $series . $number;
-        }
+
+        /*
+         * SInvoice định nghĩa originalInvoiceId là invoiceNo do API phát hành
+         * trả về (ví dụ K26TXM2422 / C24TGS0000001). invoiceSeries là một trường
+         * độc lập trong generalInvoiceInfo, không được ghép thêm vào invoiceNo.
+         */
         return $number;
     }
 

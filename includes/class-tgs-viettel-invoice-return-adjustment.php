@@ -381,9 +381,28 @@ class TGS_Viettel_Invoice_Return_Adjustment
                 continue;
             }
 
-            $before = max(0, intval(round($unit_price * $quantity)));
-            $tax = max(0, intval(round(floatval($return_item['local_ledger_item_tax_amount'] ?? 0))));
-            $with_tax = $before + $tax;
+            /*
+             * Dựng tiền GIỐNG HỆT hoá đơn gốc, chỉ đổi số lượng thành số lượng
+             * hoàn: cùng đơn giá đã khai, cùng lớp tính tiền, cùng cách neo vào
+             * tiền khách trả (with_tax làm tròn từ `thanh_tien`, thuế là hiệu).
+             *
+             * Bản cũ lấy `before` tự nhân rồi cộng với `tax_amount` lưu ở dòng
+             * hoàn — hai nguồn khác nhau nên số điều chỉnh giảm có thể lệch 1đ
+             * so với phần tương ứng của hoá đơn gốc, mà cơ quan thuế đối chiếu
+             * gốc với điều chỉnh.
+             */
+            $money = TGS_Viettel_Invoice_Flow_Service::money_class();
+            if ($money === '') {
+                return [
+                    'success' => false,
+                    'message' => 'thiếu lớp tính tiền (TGS_Money / TGS_POS_Money) để dựng hóa đơn điều chỉnh',
+                ];
+            }
+
+            $money_line = $money::line($quantity, $unit_price, 0, $tax_percent);
+            $before   = max(0, (int) round($money_line['tien_hang_sau_ck']));
+            $with_tax = max(0, (int) round($money_line['thanh_tien']));
+            $tax      = max(0, $with_tax - $before);
             $items[] = [
                 'lineNumber' => $line++,
                 'selection' => 1,

@@ -72,7 +72,12 @@ class TGS_Viettel_Invoice_Flow_Service
      *
      * @return string Tên lớp, hoặc chuỗi rỗng nếu không có bản nào.
      */
-    private static function money_class()
+    /**
+     * Lớp thực thi mô hình tiền. Public để luồng điều chỉnh (hoá đơn trả hàng)
+     * dùng CHUNG một công thức với hoá đơn gốc — hai bên lệch nhau là hoá đơn
+     * điều chỉnh không khớp hoá đơn bị điều chỉnh.
+     */
+    public static function money_class()
     {
         foreach (['TGS_Money', 'TGS_POS_Money'] as $cls) {
             if (class_exists($cls)) {
@@ -147,6 +152,8 @@ class TGS_Viettel_Invoice_Flow_Service
         $has_local_product_sku = $this->local_ledger_item_column_exists('local_product_sku');
         $has_tax_percent = $this->local_ledger_item_column_exists('local_ledger_item_tax_percent');
         $has_discount_amount = $this->local_ledger_item_column_exists('local_ledger_item_discount_amount');
+        // Tiền thuế đã chốt lúc bán — CHỈ để đối chiếu, không dùng dựng hoá đơn.
+        $has_tax_amount = $this->local_ledger_item_column_exists('local_ledger_item_tax_amount');
 
         $optional_selects = [];
         if ($has_under24_promo_danger) {
@@ -155,6 +162,7 @@ class TGS_Viettel_Invoice_Flow_Service
         $optional_selects[] = $has_global_product_name_id ? 'i.global_product_name_id' : '0 AS global_product_name_id';
         $optional_selects[] = $has_local_product_sku ? 'i.local_product_sku' : "'' AS local_product_sku";
         $optional_selects[] = $has_tax_percent ? 'i.local_ledger_item_tax_percent' : 'NULL AS local_ledger_item_tax_percent';
+        $optional_selects[] = $has_tax_amount ? 'i.local_ledger_item_tax_amount' : '0 AS local_ledger_item_tax_amount';
         $optional_select_sql = empty($optional_selects) ? '' : ', ' . implode(', ', $optional_selects);
 
         $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
@@ -247,6 +255,12 @@ class TGS_Viettel_Invoice_Flow_Service
                 'quantity' => $quantity,
                 'unit_price_after_discount' => $unit_price,
                 'discount_amount' => floatval($item['local_ledger_item_discount_amount'] ?? 0),
+                /*
+                 * Tiền thuế ĐÃ CHỐT lúc bán. Không dùng để dựng hoá đơn (hoá
+                 * đơn tự tính lại từ 5 cột gốc), chỉ để đối chiếu: lệch quá 1đ
+                 * là dòng dữ liệu hỏng, phải chặn trước khi phát hành.
+                 */
+                'stored_tax_amount' => floatval($item['local_ledger_item_tax_amount'] ?? 0),
                 /*
                  * CK% suy từ tiền chiết khấu — công thức (7). Không đọc hai cột
                  * `local_ledger_item_discount` / `..._discount_type`: chúng nằm
@@ -468,14 +482,54 @@ class TGS_Viettel_Invoice_Flow_Service
             }
 
             $line        = $money::line($quantity, $unit_price, 0, $tax_percent);
-            $without_tax = max(0, (int) round($line['tien_hang_sau_ck']));
-            $tax_amount  = max(0, (int) round($line['thue']));
+
             /*
-             * Cộng lại từ hai số ĐÃ làm tròn, không làm tròn `thanh_tien` riêng:
-             * làm tròn riêng có thể lệch 1đ so với tổng hai dòng trên, và Viettel
-             * đối chiếu tổng nên sẽ trả về lỗi.
+             * ─── BA SỐ CỦA DÒNG, NEO VÀO TIỀN KHÁCH THẬT SỰ TRẢ ─────────────
+             *
+             * `itemTotalAmountWithTax` phải bằng ĐÚNG số đã thu của dòng đó,
+             * nên nó được làm tròn TRỰC TIẾP từ `thanh_tien`, rồi tiền thuế mới
+             * suy ra bằng hiệu. Nhờ vậy:
+             *
+             *   • without + tax = with_tax  → thoả ràng buộc Viettel đối chiếu
+             *   • Σ with_tax    = đúng số tiền phiếu bán đã thu của khách
+             *
+             * Bản cũ làm tròn riêng `tien_hang_sau_ck` và `thue` rồi cộng lại:
+             * hai phần lẻ cùng ≥ 0,5 là hoá đơn khai dôi 1đ so với số đã thu, mà
+             * hoá đơn phát hành rồi thì không sửa được. Đây cũng đúng quy tắc
+             * "làm tròn từng dòng rồi mới cộng" ở mục 2 của tài liệu mô hình
+             * tiền, và trùng cách POS chốt `local_ledger_item_tax_amount`
+             * (thuế = tiền đã thu − tiền hàng trước thuế).
              */
-            $with_tax    = $without_tax + $tax_amount;
+            $without_tax = max(0, (int) round($line['tien_hang_sau_ck']));
+            $with_tax    = max(0, (int) round($line['thanh_tien']));
+            $tax_amount  = max(0, $with_tax - $without_tax);
+
+            /*
+             * ─── ĐỐI CHIẾU VỚI SỐ ĐÃ CHỐT LÚC BÁN ───────────────────────────
+             *
+             * `local_ledger_item_tax_amount` là tiền thuế khoá tại thời điểm
+             * phát sinh, tức phần thuế nằm trong số khách đã trả. Dựng lại từ
+             * 5 cột gốc mà ra số khác quá 1đ thì dòng đó đang tự mâu thuẫn
+             * (giá/thuế bị tách sai tỉ lệ — bẫy 7.6), KHÔNG phải chuyện làm
+             * tròn. Hoá đơn phát hành rồi không sửa được nên dừng ở đây, giống
+             * cách luồng này đã chặn dòng thiếu thuế suất.
+             *
+             * Bỏ qua khi dòng chưa có tiền thuế (đơn cũ, chờ bước vá dữ liệu
+             * bù vào) — chặn cả những dòng đó thì quầy không xuất được hoá đơn.
+             */
+            $stored_tax = (float) ($item['stored_tax_amount'] ?? 0);
+            if ($stored_tax > 0 && abs($stored_tax - $tax_amount) > 1.0) {
+                return [
+                    'success' => false,
+                    'message' => sprintf(
+                        'Dòng "%s" có tiền thuế lệch với số đã chốt lúc bán (%sđ so với %sđ). '
+                            . 'Kiểm tra lại đơn giá/thuế của dòng này trước khi phát hành hóa đơn.',
+                        (string) ($item['sku'] ?? ''),
+                        number_format($tax_amount, 0, ',', '.'),
+                        number_format($stored_tax, 0, ',', '.')
+                    ),
+                ];
+            }
 
             $sum_without_tax += $without_tax;
             $sum_tax         += $tax_amount;

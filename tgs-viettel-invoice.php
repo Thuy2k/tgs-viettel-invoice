@@ -1531,12 +1531,29 @@ class TGS_Viettel_Invoice_Plugin
 
         $under24_main_skus = array_values(array_unique($under24_main_skus));
 
+        /*
+         * ─── PHIẾU TÁCH HÀNG MÃ Z ───────────────────────────────────────────
+         *
+         * POS tách đơn ngay lúc thanh toán, nên hàng mã Z KHÔNG còn nằm trong
+         * phiếu này mà ở phiếu con <mã>Z. Màn review phải đọc thêm phiếu con
+         * để dựng đúng "hai bill" cho nhân viên xem, chứ không phải hai tab
+         * hàng chính / hàng KM như trước.
+         *
+         * Đơn CŨ (bán trước khi có tách phiếu) không có phiếu con — hàng mã Z
+         * vẫn nằm chung; UI tự gom chúng vào khối "không gửi thuế" theo cờ.
+         */
+        $promo_split = $this->load_promo_split_ticket($sale_ledger_id);
+
         wp_send_json_success([
             'gift_items'               => $gift_items,
             'main_items'               => $main_items,
             'all_items'                => $all_items,
             'has_under24_main'         => $has_under24_main,
             'under24_main_skus'        => $under24_main_skus,
+            'promo_split'              => $promo_split,
+            'is_promo_split_sale'      => TGS_Viettel_Invoice_Flow_Service::is_promo_split_sale_code(
+                (string) ($sale['local_ledger_code'] ?? '')
+            ),
             'stat_z_sku_count'         => $stat_z_sku_count,
             'stat_z_main_count'        => $stat_z_main_count,
             'stat_danger_flagged_count' => $stat_danger_flagged_count,
@@ -1545,6 +1562,90 @@ class TGS_Viettel_Invoice_Plugin
             'sale_date'                => (string) ($sale['created_at'] ?? ''),
             'customer'                 => $preview_customer,
         ]);
+    }
+
+    /**
+     * Đọc phiếu tách hàng mã Z (con của phiếu bán đang xem) kèm dòng hàng.
+     *
+     * @return array|null null khi đơn không có phiếu tách (đơn cũ, hoặc đơn
+     *                    không có hàng mã Z nào).
+     */
+    private function load_promo_split_ticket($parent_sale_ledger_id)
+    {
+        global $wpdb;
+
+        $parent_sale_ledger_id = intval($parent_sale_ledger_id);
+        if ($parent_sale_ledger_id <= 0) {
+            return null;
+        }
+
+        $type_sale_order = defined('TGS_LEDGER_TYPE_SALE_ORDER') ? TGS_LEDGER_TYPE_SALE_ORDER : 10;
+
+        $child = $wpdb->get_row(
+            $wpdb->prepare(
+                'SELECT local_ledger_id, local_ledger_code, local_ledger_total_amount,
+                        local_ledger_item_id, created_at
+                 FROM ' . TGS_TABLE_LOCAL_LEDGER . '
+                 WHERE local_ledger_parent_id = %d
+                   AND local_ledger_type = %d
+                   AND (is_deleted = 0 OR is_deleted IS NULL)
+                 ORDER BY local_ledger_id ASC
+                 LIMIT 1',
+                $parent_sale_ledger_id,
+                $type_sale_order
+            ),
+            ARRAY_A
+        );
+
+        if (empty($child)) {
+            return null;
+        }
+
+        $item_ids = json_decode((string) ($child['local_ledger_item_id'] ?? ''), true);
+        $item_ids = is_array($item_ids) ? array_map('intval', array_filter($item_ids)) : [];
+
+        $items = [];
+        if (!empty($item_ids)) {
+            $has_local_product_sku = $this->flow_service->local_ledger_item_column_exists('local_product_sku');
+            $sku_sql = $has_local_product_sku ? ', i.local_product_sku' : ", '' AS local_product_sku";
+            $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
+
+            $rows = $wpdb->get_results(
+                $wpdb->prepare(
+                    'SELECT i.local_ledger_item_id, i.local_product_name_id, i.quantity, i.price,
+                            i.local_ledger_item_gift_type' . $sku_sql . '
+                     FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
+                     WHERE i.local_ledger_item_id IN (' . $placeholders . ')
+                     ORDER BY i.local_ledger_item_id ASC',
+                    ...$item_ids
+                ),
+                ARRAY_A
+            ) ?: [];
+
+            if (class_exists('TGS_Viettel_Invoice_Global_Products')) {
+                $rows = TGS_Viettel_Invoice_Global_Products::enrich_ledger_items($rows, get_current_blog_id());
+            }
+
+            foreach ($rows as $row) {
+                $items[] = [
+                    'item_id'   => intval($row['local_ledger_item_id']),
+                    'name'      => (string) ($row['local_product_name'] ?? ''),
+                    'sku'       => (string) ($row['local_product_sku'] ?? ''),
+                    'unit_name' => (string) ($row['local_product_unit'] ?? ''),
+                    'quantity'  => floatval($row['quantity']),
+                    'price'     => floatval($row['price']),
+                    'is_gift'   => intval($row['local_ledger_item_gift_type'] ?? 0) === 1,
+                ];
+            }
+        }
+
+        return [
+            'sale_ledger_id' => intval($child['local_ledger_id']),
+            'sale_code'      => (string) ($child['local_ledger_code'] ?? ''),
+            'total'          => floatval($child['local_ledger_total_amount'] ?? 0),
+            'sale_date'      => (string) ($child['created_at'] ?? ''),
+            'items'          => $items,
+        ];
     }
 
     /**

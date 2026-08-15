@@ -73,6 +73,26 @@ class TGS_Viettel_Invoice_Flow_Service
      * @return string Tên lớp, hoặc chuỗi rỗng nếu không có bản nào.
      */
     /**
+     * Mã phiếu này có phải phiếu tách hàng khuyến mãi (mã Z) không.
+     *
+     * Đọc thẳng quy ước từ TGS_POS_Order_Handler khi có, để hai plugin không
+     * bao giờ hiểu khác nhau về hậu tố; POS tắt thì rơi về mặc định 'Z'.
+     */
+    public static function is_promo_split_sale_code($sale_code)
+    {
+        $sale_code = strtoupper(trim((string) $sale_code));
+        if ($sale_code === '') {
+            return false;
+        }
+
+        $suffix = class_exists('TGS_POS_Order_Handler')
+            ? strtoupper((string) TGS_POS_Order_Handler::promo_split_code_suffix())
+            : 'Z';
+
+        return $suffix !== '' && substr($sale_code, -strlen($suffix)) === $suffix;
+    }
+
+    /**
      * Lớp thực thi mô hình tiền. Public để luồng điều chỉnh (hoá đơn trả hàng)
      * dùng CHUNG một công thức với hoá đơn gốc — hai bên lệch nhau là hoá đơn
      * điều chỉnh không khớp hoá đơn bị điều chỉnh.
@@ -119,6 +139,28 @@ class TGS_Viettel_Invoice_Flow_Service
             return [
                 'success' => false,
                 'message' => 'Không tìm thấy đơn bán hàng.',
+            ];
+        }
+
+        /*
+         * ─── PHIẾU TÁCH HÀNG MÃ Z KHÔNG GỬI CƠ QUAN THUẾ ────────────────────
+         *
+         * POS tách đơn ngay lúc thanh toán: hàng chính ở phiếu <mã>, hàng mã Z
+         * ở phiếu con <mã>Z (xem TGS_POS_Order_Handler). Phiếu con toàn hàng
+         * không được kèm lên hoá đơn thuế, nên chặn ngay từ bước dựng dữ liệu —
+         * ai bấm nhầm vào phiếu con cũng không phát hành được.
+         *
+         * Muốn gửi cả phiếu con thì bật filter, không phải sửa luồng:
+         *   add_filter('tgs_pos_send_promo_split_to_tax', '__return_true');
+         */
+        $sale_code = (string) ($sale['local_ledger_code'] ?? '');
+        if (self::is_promo_split_sale_code($sale_code)
+            && !apply_filters('tgs_pos_send_promo_split_to_tax', false, $sale_code, $sale)) {
+            return [
+                'success' => false,
+                'message' => 'Phiếu ' . $sale_code . ' là phiếu tách hàng khuyến mãi (mã Z) — '
+                    . 'không phát hành hoá đơn cho phiếu này. Hoá đơn đã nằm ở phiếu gốc.',
+                'is_promo_split' => true,
             ];
         }
 

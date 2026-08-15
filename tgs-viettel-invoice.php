@@ -1820,13 +1820,7 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        $customer_override_raw = sanitize_text_field($_POST['customer_override'] ?? '');
-        $customer_override = ($customer_override_raw !== '' && $customer_override_raw !== '{}')
-            ? json_decode(stripslashes($customer_override_raw), true)
-            : [];
-        if (!is_array($customer_override)) {
-            $customer_override = [];
-        }
+        $customer_override = $this->parse_customer_override_from_post();
 
         $flow_result = $this->run_auto_issue_cqt_flow([
             'sale_ledger_id' => $sale_ledger_id,
@@ -3210,6 +3204,14 @@ class TGS_Viettel_Invoice_Plugin
                 return;
             }
 
+            // Form review là dữ liệu người mua cuối cùng mà nhân viên xác nhận
+            // trước khi phát hành. Ghi đè lên khách của đơn gốc (thường là
+            // "Khách lẻ") trước khi lọc item và dựng buyerInfo cho Viettel.
+            $customer_override = $this->parse_customer_override_from_post();
+            foreach ($customer_override as $field => $value) {
+                $source_result['payload']['customer'][$field] = $value;
+            }
+
             // Áp dụng danh sách loại trừ trực tiếp từ frontend (source of truth).
             // Xoá hết flag danger trước, rồi set true chỉ cho item trong danh sách loại trừ.
             $excluded_ids_raw = sanitize_text_field($_POST['excluded_item_ids'] ?? '');
@@ -3426,6 +3428,47 @@ class TGS_Viettel_Invoice_Plugin
             return [];
         }
         return array_values(array_filter(array_map('intval', $ids)));
+    }
+
+    /**
+     * Đọc thông tin người mua được nhân viên nhập tại màn review POS.
+     * Chỉ cho phép các trường mà payload trung gian và Viettel Invoice hỗ trợ.
+     */
+    private function parse_customer_override_from_post()
+    {
+        $raw = isset($_POST['customer_override']) && is_scalar($_POST['customer_override'])
+            ? wp_unslash((string) $_POST['customer_override'])
+            : '';
+        if ($raw === '' || $raw === '{}') {
+            return [];
+        }
+
+        $decoded = json_decode($raw, true);
+        if (!is_array($decoded)) {
+            return [];
+        }
+
+        $allowed_fields = [
+            'customer_name',
+            'customer_company_name',
+            'customer_tax_code',
+            'customer_address',
+            'customer_phone',
+            'customer_email',
+        ];
+        $customer_override = [];
+        foreach ($allowed_fields as $field) {
+            if (!isset($decoded[$field]) || !is_scalar($decoded[$field])) {
+                continue;
+            }
+
+            $value = sanitize_text_field((string) $decoded[$field]);
+            if ($value !== '') {
+                $customer_override[$field] = $value;
+            }
+        }
+
+        return $customer_override;
     }
 
     private function run_auto_issue_cqt_flow($sale_data, $settings, $enforce_idempotency = true)

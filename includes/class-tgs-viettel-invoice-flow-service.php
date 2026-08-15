@@ -500,7 +500,9 @@ class TGS_Viettel_Invoice_Flow_Service
                 'itemName' => (string) ($item['item_name'] ?? ''),
                 'unitName' => (string) ($item['unit_name'] ?? ''),
                 'quantity' => $quantity,
-                'unitPrice' => round($unit_price),
+                // Giữ phần thập phân để quantity × unitPrice khớp thành tiền
+                // trong ngưỡng Viettel cho phép, nhất là dòng có SL lớn.
+                'unitPrice' => round($unit_price, 6),
                 'itemTotalAmountWithoutTax' => $without_tax,
                 'itemTotalAmountAfterDiscount' => $without_tax,
                 'itemTotalAmountWithTax' => $with_tax,

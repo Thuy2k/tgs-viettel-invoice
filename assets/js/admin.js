@@ -235,4 +235,35 @@
         $box.val(JSON.stringify(parsed, null, 2));
         $('#tgs-viettel-response-status').removeClass('text-danger').addClass('text-success').text('Da cap nhat strIssueDate theo thoi gian hien tai.');
     });
+
+    $(document).on('click', '.tgs-viettel-retry-return', function () {
+        var $button = $(this);
+        var queueId = parseInt($button.data('queue-id'), 10) || 0;
+        if (!queueId || $button.prop('disabled')) {
+            return;
+        }
+
+        $button.prop('disabled', true).text('Đang gửi...');
+        showFeedback('#tgs-viettel-return-feedback', 'info', 'Đang kiểm tra hóa đơn gốc và xử lý hóa đơn điều chỉnh...');
+        $.post(tgsViettelInvoice.ajaxUrl, {
+            action: 'tgs_viettel_retry_return_adjustment',
+            nonce: tgsViettelInvoice.nonce,
+            queue_id: queueId
+        }).done(function (resp) {
+            if (resp && resp.success) {
+                showFeedback('#tgs-viettel-return-feedback', 'success', resp.data.message || 'Đã gửi hóa đơn điều chỉnh thành công.');
+                setTimeout(function () { window.location.reload(); }, 800);
+                return;
+            }
+            var message = (resp && resp.data && resp.data.message) || 'Chưa xử lý được hóa đơn điều chỉnh.';
+            showFeedback('#tgs-viettel-return-feedback', 'danger', message);
+            $button.prop('disabled', false).text('Gửi lại');
+        }).fail(function (xhr) {
+            var message = xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message
+                ? xhr.responseJSON.data.message
+                : 'Có lỗi khi gửi lại hóa đơn điều chỉnh.';
+            showFeedback('#tgs-viettel-return-feedback', 'danger', message);
+            $button.prop('disabled', false).text('Gửi lại');
+        });
+    });
 })(jQuery);

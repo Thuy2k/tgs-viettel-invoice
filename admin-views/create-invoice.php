@@ -12,6 +12,7 @@ $view_data = tgs_viettel_invoice()->get_create_view_data();
 $sample_json = $view_data['sample_json'];
 $cancel_sample_json = $view_data['cancel_sample_json'];
 $recent_invoices = $view_data['recent_invoices'];
+$return_adjustments = $view_data['return_adjustments'] ?? [];
 ?>
 
 <div class="container-fluid py-3" id="tgs-viettel-create-root">
@@ -76,6 +77,59 @@ $recent_invoices = $view_data['recent_invoices'];
         <div class="card-body">
             <div id="tgs-viettel-response-status" class="small text-muted mb-2">Chua gui request.</div>
             <pre id="tgs-viettel-response-box" class="bg-light border rounded p-3 mb-0" style="max-height:400px; overflow:auto;">{}</pre>
+        </div>
+    </div>
+
+    <div class="card mb-3" id="tgs-viettel-return-adjustments">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <strong>Hoàn hàng cần điều chỉnh thuế</strong>
+            <span class="badge bg-secondary"><?php echo intval(count($return_adjustments)); ?> bản ghi gần nhất</span>
+        </div>
+        <div class="card-body pb-0">
+            <div id="tgs-viettel-return-feedback" class="alert d-none mb-3"></div>
+            <p class="small text-muted">Kho và tiền có thể đã hoàn thành trước. Các dòng chưa thành công cần kế toán kiểm tra hóa đơn gốc rồi bấm gửi lại; hệ thống không xóa hóa đơn gốc.</p>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-sm table-striped align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th>Phiếu hoàn</th>
+                        <th>Đơn bán</th>
+                        <th>Hóa đơn gốc</th>
+                        <th>Trạng thái</th>
+                        <th>Lỗi/Ghi chú</th>
+                        <th>Cập nhật</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php if (empty($return_adjustments)): ?>
+                        <tr><td colspan="7" class="text-center text-muted py-3">Chưa có phiếu hoàn cần điều chỉnh thuế.</td></tr>
+                    <?php else: ?>
+                        <?php foreach ($return_adjustments as $row): ?>
+                            <?php
+                            $status = sanitize_key($row['status'] ?? 'pending');
+                            $badge = $status === 'done' ? 'success' : (($status === 'processing' || $status === 'pending') ? 'warning' : 'danger');
+                            ?>
+                            <tr data-return-adjustment-row="<?php echo intval($row['id']); ?>">
+                                <td>#<?php echo intval($row['return_ledger_id']); ?></td>
+                                <td>#<?php echo intval($row['sale_ledger_id']); ?></td>
+                                <td><?php echo esc_html($row['original_invoice_no'] ?? ''); ?></td>
+                                <td><span class="badge bg-<?php echo esc_attr($badge); ?>"><?php echo esc_html($status); ?></span></td>
+                                <td class="small" style="max-width:420px"><?php echo esc_html($row['error_message'] ?? ''); ?></td>
+                                <td><?php echo esc_html($row['updated_at'] ?? ''); ?></td>
+                                <td class="text-end">
+                                    <?php if ($status !== 'done'): ?>
+                                        <button type="button" class="btn btn-sm btn-outline-primary tgs-viettel-retry-return" data-queue-id="<?php echo intval($row['id']); ?>">Gửi lại</button>
+                                    <?php else: ?>
+                                        <span class="small text-success"><?php echo esc_html($row['adjustment_invoice_no'] ?? 'Đã xong'); ?></span>
+                                    <?php endif; ?>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
+                </tbody>
+            </table>
         </div>
     </div>
 

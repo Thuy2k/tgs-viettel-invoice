@@ -11,7 +11,7 @@ if (!defined('ABSPATH')) {
  */
 class TGS_Viettel_Invoice_Clusters
 {
-    const DB_VERSION = '1.0.0';
+    const DB_VERSION = '1.1.0';
     const DB_OPTION = 'tgs_viettel_invoice_cluster_db_version';
     const NONCE_ACTION = 'tgs_viettel_invoice_nonce';
 
@@ -57,6 +57,7 @@ class TGS_Viettel_Invoice_Clusters
             'users' => $wpdb->base_prefix . 'tgs_viettel_invoice_cluster_users',
             'audit' => $wpdb->base_prefix . 'tgs_viettel_invoice_cluster_audit',
             'snapshots' => $wpdb->base_prefix . 'tgs_viettel_invoice_config_snapshots',
+            'return_adjustments' => $wpdb->base_prefix . 'tgs_viettel_invoice_return_adjustments',
         ];
     }
 
@@ -153,6 +154,33 @@ class TGS_Viettel_Invoice_Clusters
             UNIQUE KEY invoice_source (blog_id,invoice_record_id),
             KEY sale_source (blog_id,sale_ledger_id),
             KEY cluster_id (cluster_id)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$t['return_adjustments']} (
+            id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+            blog_id bigint(20) unsigned NOT NULL,
+            return_ledger_id bigint(20) unsigned NOT NULL,
+            sale_ledger_id bigint(20) unsigned NOT NULL,
+            original_invoice_record_id bigint(20) unsigned NOT NULL DEFAULT 0,
+            adjustment_invoice_record_id bigint(20) unsigned NOT NULL DEFAULT 0,
+            status varchar(30) NOT NULL DEFAULT 'pending',
+            attempt_count int unsigned NOT NULL DEFAULT 0,
+            transaction_uuid varchar(64) NOT NULL DEFAULT '',
+            original_invoice_no varchar(255) NOT NULL DEFAULT '',
+            adjustment_invoice_no varchar(255) NOT NULL DEFAULT '',
+            request_payload longtext NULL,
+            response_payload longtext NULL,
+            error_message text NULL,
+            created_by bigint(20) unsigned NOT NULL DEFAULT 0,
+            created_at datetime NOT NULL,
+            updated_at datetime NOT NULL,
+            processed_at datetime NULL,
+            PRIMARY KEY  (id),
+            UNIQUE KEY return_source (blog_id,return_ledger_id),
+            KEY sale_source (blog_id,sale_ledger_id),
+            KEY original_invoice (original_invoice_record_id),
+            KEY status (status),
+            KEY created_at (created_at)
         ) {$charset};");
 
         if (is_multisite()) {

@@ -3098,6 +3098,7 @@ class TGS_Viettel_Invoice_Plugin
         {
             ?>
             <button type="button"
+                data-viettel-receipt-action="1"
                 x-effect="refreshViettelReceiptStatus(getViettelSaleLedgerId())"
                 x-on:click="handleViettelReceiptButton()"
                 :disabled="isViettelReceiptButtonDisabled()"

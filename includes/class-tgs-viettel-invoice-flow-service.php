@@ -675,9 +675,27 @@ class TGS_Viettel_Invoice_Flow_Service
                 'itemName' => (string) ($item['item_name'] ?? ''),
                 'unitName' => (string) ($item['unit_name'] ?? ''),
                 'quantity' => $quantity,
-                // Giữ phần thập phân để quantity × unitPrice khớp thành tiền
-                // trong ngưỡng Viettel cho phép, nhất là dòng có SL lớn.
-                'unitPrice' => round($unit_price, 6),
+                /*
+                 * ─── ĐƠN GIÁ TỐI ĐA 4 CHỮ SỐ THẬP PHÂN ──────────────────────
+                 *
+                 * Viettel từ chối payload có đơn giá lẻ hơn 4 số:
+                 *   {"code":400,"message":"INVALID_DECIMAL_POINT_PRICE",
+                 *    "data":"Đơn giá của hàng hóa có phần thập phân tối đa 4 ký tự"}
+                 *
+                 * Đơn giá ở đây là tiền hàng sau CK chia cho số lượng, nên rất
+                 * hay ra số vô hạn tuần hoàn — đơn HD80_N59XC: 388.889 / 12 =
+                 * 32.407,41666… Bản cũ làm tròn 6 số nên bị chặn.
+                 *
+                 * KHÔNG ảnh hưởng tiền: ba con số quyết định của dòng
+                 * (itemTotalAmountWithoutTax / WithTax / taxAmount) đã được chốt
+                 * ở trên theo đúng số khách trả, unitPrice chỉ là số hiển thị.
+                 * Chênh do làm tròn ở mức 0,0001đ × số lượng, không tới 1đ.
+                 *
+                 * Dùng sprintf rồi ép lại float thay vì round(): với server đặt
+                 * serialize_precision cao, round(x, 4) vẫn có thể bị json_encode
+                 * in ra 32407.416700000001 — đúng cái lỗi cần tránh.
+                 */
+                'unitPrice' => (float) sprintf('%.4F', $unit_price),
                 'itemTotalAmountWithoutTax' => $without_tax,
                 'itemTotalAmountAfterDiscount' => $without_tax,
                 'itemTotalAmountWithTax' => $with_tax,

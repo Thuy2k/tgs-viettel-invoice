@@ -165,26 +165,21 @@ class TGS_Viettel_Invoice_Flow_Service
         }
 
         /*
-         * ─── PHIẾU TÁCH HÀNG MÃ Z KHÔNG GỬI CƠ QUAN THUẾ ────────────────────
+         * ─── CHẶN GỬI THUẾ XÉT THEO MÃ HÀNG, KHÔNG XÉT MÃ PHIẾU ─────────────
          *
-         * POS tách đơn ngay lúc thanh toán: hàng chính ở phiếu <mã>, hàng mã Z
-         * ở phiếu con <mã>Z (xem TGS_POS_Order_Handler). Phiếu con toàn hàng
-         * không được kèm lên hoá đơn thuế, nên chặn ngay từ bước dựng dữ liệu —
-         * ai bấm nhầm vào phiếu con cũng không phát hành được.
+         * Trước đây chặn ngay tại đây khi MÃ PHIẾU kết thúc bằng "Z", coi đó là
+         * phiếu tách hàng khuyến mãi. Nhưng mã phiếu của POS sinh ngẫu nhiên
+         * nên tự nó có thể kết thúc bằng Z (HD98_9SGEZ, HD98_KTMXZ — có thật),
+         * và những đơn đó bị chặn oan dù bên trong không có mã hàng nào đuôi Z.
          *
-         * Muốn gửi cả phiếu con thì bật filter, không phải sửa luồng:
-         *   add_filter('tgs_pos_send_promo_split_to_tax', '__return_true');
+         * Quy tắc đúng chỉ có một: ĐƠN CÓ BẤT KỲ DÒNG HÀNG NÀO MÃ ĐUÔI Z thì
+         * không gửi thuế. Việc đó do bước lọc dòng hàng bên dưới lo (xem
+         * filter_and_sort_items_for_tax) — phiếu tách thật toàn hàng mã Z nên
+         * vẫn bị chặn y như cũ, còn phiếu chỉ TRÙNG TÊN thì gửi bình thường.
+         *
+         * Mã phiếu giờ cũng không còn sinh ra đuôi Z nữa: xem
+         * TGS_POS_Ajax_Order::generate_sale_code().
          */
-        $sale_code = (string) ($sale['local_ledger_code'] ?? '');
-        if (self::is_promo_split_sale_code($sale_code)
-            && !apply_filters('tgs_pos_send_promo_split_to_tax', false, $sale_code, $sale)) {
-            return [
-                'success' => false,
-                'message' => 'Phiếu ' . $sale_code . ' là phiếu tách hàng khuyến mãi (mã Z) — '
-                    . 'không phát hành hoá đơn cho phiếu này. Hoá đơn đã nằm ở phiếu gốc.',
-                'is_promo_split' => true,
-            ];
-        }
 
         $person = [];
         if (defined('TGS_TABLE_LOCAL_LEDGER_PERSON') && !empty($sale['local_ledger_person_id'])) {

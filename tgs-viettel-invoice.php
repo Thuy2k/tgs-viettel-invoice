@@ -1067,9 +1067,13 @@ class TGS_Viettel_Invoice_Plugin
                 // ở phiếu tách, còn sót trong phiếu chính là phải xem lại.
                 $row['has_promo_item'] = !empty($under24_flags['has_promo'][$sale_id_for_flags]) ? 1 : 0;
                 $row['promo_skus'] = array_values((array) ($under24_flags['promo_skus'][$sale_id_for_flags] ?? []));
-                $row['is_promo_split_ticket'] = TGS_Viettel_Invoice_Flow_Service::is_promo_split_sale_code(
-                    (string) ($row['local_ledger_code'] ?? '')
-                ) ? 1 : 0;
+                /*
+                 * "Phiếu tách mã Z" nhận diện bằng MÃ HÀNG bên trong, không phải
+                 * bằng mã phiếu. Mã phiếu POS sinh ngẫu nhiên nên có thể tự kết
+                 * thúc bằng Z (HD98_9SGEZ) — đọc theo mã phiếu là dán nhầm nhãn
+                 * và chặn oan một đơn hoàn toàn bình thường.
+                 */
+                $row['is_promo_split_ticket'] = $row['is_promo_only'];
                 $row['age_group'] = !empty($row['contains_under24_main_item']) ? 'under24' : 'over24';
                 $row['row_key'] = 'sale:' . intval($row['sale_ledger_id'] ?? 0);
                 $row['document_type'] = 'sale';
@@ -1561,9 +1565,14 @@ class TGS_Viettel_Invoice_Plugin
             'has_under24_main'         => $has_under24_main,
             'under24_main_skus'        => $under24_main_skus,
             'promo_split'              => $promo_split,
-            'is_promo_split_sale'      => TGS_Viettel_Invoice_Flow_Service::is_promo_split_sale_code(
-                (string) ($sale['local_ledger_code'] ?? '')
-            ),
+            /*
+             * "Đơn toàn hàng mã Z" xét theo MÃ HÀNG, không theo mã phiếu: mã
+             * phiếu sinh ngẫu nhiên nên có thể tự kết thúc bằng Z và làm màn
+             * review báo nhầm "đơn mã Z — không cần qua thuế" cho một đơn bình
+             * thường. Có dòng hàng, và mọi dòng đều đuôi Z, thì mới đúng.
+             */
+            'is_promo_split_sale'      => !empty($all_items)
+                && ($stat_z_sku_count + $stat_z_main_count) === count($all_items),
             'stat_z_sku_count'         => $stat_z_sku_count,
             'stat_z_main_count'        => $stat_z_main_count,
             'stat_danger_flagged_count' => $stat_danger_flagged_count,

@@ -374,7 +374,26 @@ class TGS_Viettel_Invoice_Return_Adjustment
             }
 
             $source = $original_map[$source_id];
-            $quantity = max(0, floatval($return_item['quantity'] ?? 0));
+
+            /*
+             * ─── QUY SỐ LƯỢNG HOÀN VỀ ĐÚNG ĐVT CỦA HOÁ ĐƠN GỐC ──────────────
+             *
+             * Phiếu hoàn ghi theo đơn vị nhỏ nhất (4 Hộp), còn hoá đơn gốc khai
+             * theo ĐVT bán (1 Vỉ_4) với đơn giá của trọn 1 Vỉ_4. Lấy thẳng số
+             * lượng của phiếu hoàn nhân với đơn giá đó là điều chỉnh giảm gấp 4
+             * lần số thật — mà cơ quan thuế đối chiếu gốc với điều chỉnh.
+             *
+             * Tỷ lệ lấy từ chính snapshot của hoá đơn gốc, không tính lại từ
+             * bảng giá: bảng giá có thể đã đổi ĐVT sau ngày bán, còn hoá đơn
+             * gốc thì đứng yên. Hoá đơn phát hành trước khi có trường này đọc
+             * ra 0 → coi như 1, đúng bằng cách hoá đơn đó đã khai.
+             */
+            $unit_ratio = (float) ($source['unit_ratio'] ?? 0);
+            if ($unit_ratio <= 0) {
+                $unit_ratio = 1.0;
+            }
+
+            $quantity = max(0, floatval($return_item['quantity'] ?? 0)) / $unit_ratio;
             $unit_price = max(0, floatval($source['unit_price_after_discount'] ?? 0));
             $tax_percent = TGS_Viettel_Invoice_Flow_Service::tax_percent_of($source['tax_percent'] ?? null);
             if ($quantity <= 0 || $tax_percent === null) {
@@ -521,8 +540,21 @@ class TGS_Viettel_Invoice_Return_Adjustment
         $returned_by_source = $this->returned_quantities_for_sale(intval($queue['sale_ledger_id'] ?? 0));
         $is_full_return = !empty($original_map);
         foreach ($original_map as $source_id => $source) {
+            /*
+             * So sánh PHẢI CÙNG ĐVT. `$source['quantity']` là số lượng theo ĐVT
+             * bán đã khai trên hoá đơn (1 Vỉ_4), còn phiếu hoàn cộng theo đơn vị
+             * nhỏ nhất (4 Hộp) — đem so thẳng thì hoàn 1 Hộp/4 đã bị coi là hoàn
+             * hết đơn, và hoá đơn sẽ bị huỷ thay vì điều chỉnh giảm.
+             */
+            $source_ratio = (float) ($source['unit_ratio'] ?? 0);
+            if ($source_ratio <= 0) {
+                $source_ratio = 1.0;
+            }
+
             $source_qty = max(0, floatval($source['quantity'] ?? 0));
-            if ($source_qty > 0 && floatval($returned_by_source[$source_id] ?? 0) + 0.00001 < $source_qty) {
+            $returned_qty = max(0, floatval($returned_by_source[$source_id] ?? 0)) / $source_ratio;
+
+            if ($source_qty > 0 && $returned_qty + 0.00001 < $source_qty) {
                 $is_full_return = false;
                 break;
             }

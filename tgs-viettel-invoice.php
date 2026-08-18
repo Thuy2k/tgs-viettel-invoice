@@ -1416,13 +1416,21 @@ class TGS_Viettel_Invoice_Plugin
         $has_tax_amount = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_tax_amount');
         $tax_amount_sql = $has_tax_amount ? ', i.local_ledger_item_tax_amount' : ', 0 AS local_ledger_item_tax_amount';
 
+        // ĐVT lúc bán (Vỉ_4…) — review phải hiện đúng thứ sẽ khai lên hoá đơn
+        $unit_cols_sql = '';
+        foreach (['local_ledger_item_unit_name', 'local_ledger_item_unit_quantity', 'local_ledger_item_unit_ratio'] as $unit_col) {
+            $unit_cols_sql .= $this->flow_service->local_ledger_item_column_exists($unit_col)
+                ? ', i.' . $unit_col
+                : ', NULL AS ' . $unit_col;
+        }
+
         $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
         $rows = $wpdb->get_results(
             $wpdb->prepare(
                 'SELECT i.local_ledger_item_id, i.local_product_name_id,
                         i.local_ledger_item_gift_type, i.local_ledger_item_meta, i.quantity, i.price,
                         i.local_ledger_item_discount, i.local_ledger_item_discount_type'
-                        . $tax_percent_sql . $discount_amount_sql . $tax_amount_sql . $danger_col_sql . $pad_col_sql . $global_id_sql . $sku_sql . '
+                        . $tax_percent_sql . $discount_amount_sql . $tax_amount_sql . $danger_col_sql . $pad_col_sql . $global_id_sql . $sku_sql . $unit_cols_sql . '
                  FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                  WHERE i.local_ledger_item_id IN (' . $placeholders . ')
                  ORDER BY i.local_ledger_item_id ASC',
@@ -1503,13 +1511,26 @@ class TGS_Viettel_Invoice_Plugin
             // hệ thống fill sẵn "loại bỏ" để an toàn — nhân viên vẫn có thể bỏ tích nếu cần.
             $is_sku_ends_z = TGS_Viettel_Invoice_Flow_Service::is_promo_split_sku($sku);
 
+            /*
+             * ─── HIỆN THEO ĐVT LÚC BÁN, KHÔNG PHẢI ĐƠN VỊ NHỎ NHẤT ──────────
+             *
+             * Bán 1 Vỉ_4 thì sổ kho ghi 4 Hộp. Màn review là bản xem trước của
+             * hoá đơn sắp gửi, nên phải hiện đúng "1 Vỉ_4" — giống hệt số sẽ
+             * khai lên cơ quan thuế (xem sale_unit_view()).
+             *
+             * `price` phải nhân theo tỷ lệ cùng lúc với `quantity`: bản xem
+             * trước tính tiền hàng bằng SL × giá − CK. Đổi mỗi số lượng mà giữ
+             * giá của đơn vị nhỏ nhất là tiền hàng tụt còn 1/4.
+             */
+            $unit_view = TGS_Viettel_Invoice_Flow_Service::sale_unit_view($row);
+            $unit_ratio = max(1.0, (float) $unit_view['ratio']);
             $item = [
                 'item_id'                 => intval($row['local_ledger_item_id']),
                 'name'                    => (string) ($row['local_product_name'] ?? ''),
                 'sku'                     => $sku,
-                'unit_name'               => (string) ($row['local_product_unit'] ?? ''),
-                'quantity'                => floatval($row['quantity']),
-                'price'                   => floatval($row['price']),
+                'unit_name'               => (string) $unit_view['unit_name'],
+                'quantity'                => (float) $unit_view['quantity'],
+                'price'                   => floatval($row['price']) * $unit_ratio,
                 'discount_value'          => $disc_value,
                 'discount_type'           => $disc_type,
                 'discount_amount'         => $disc_amount,
@@ -1627,12 +1648,21 @@ class TGS_Viettel_Invoice_Plugin
         if (!empty($item_ids)) {
             $has_local_product_sku = $this->flow_service->local_ledger_item_column_exists('local_product_sku');
             $sku_sql = $has_local_product_sku ? ', i.local_product_sku' : ", '' AS local_product_sku";
+
+            // ĐVT lúc bán — danh sách này hiện kèm phiếu tách quà, phải khớp
+            // với ĐVT mà hoá đơn khai (xem sale_unit_view()).
+            $unit_cols_sql = '';
+            foreach (['local_ledger_item_unit_name', 'local_ledger_item_unit_quantity', 'local_ledger_item_unit_ratio'] as $unit_col) {
+                $unit_cols_sql .= $this->flow_service->local_ledger_item_column_exists($unit_col)
+                    ? ', i.' . $unit_col
+                    : ', NULL AS ' . $unit_col;
+            }
             $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
 
             $rows = $wpdb->get_results(
                 $wpdb->prepare(
                     'SELECT i.local_ledger_item_id, i.local_product_name_id, i.quantity, i.price,
-                            i.local_ledger_item_gift_type' . $sku_sql . '
+                            i.local_ledger_item_gift_type' . $sku_sql . $unit_cols_sql . '
                      FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                      WHERE i.local_ledger_item_id IN (' . $placeholders . ')
                      ORDER BY i.local_ledger_item_id ASC',
@@ -1646,13 +1676,15 @@ class TGS_Viettel_Invoice_Plugin
             }
 
             foreach ($rows as $row) {
+                // Hiện theo ĐVT lúc bán, giống màn review và hoá đơn
+                $unit_view = TGS_Viettel_Invoice_Flow_Service::sale_unit_view($row);
                 $items[] = [
                     'item_id'   => intval($row['local_ledger_item_id']),
                     'name'      => (string) ($row['local_product_name'] ?? ''),
                     'sku'       => (string) ($row['local_product_sku'] ?? ''),
-                    'unit_name' => (string) ($row['local_product_unit'] ?? ''),
-                    'quantity'  => floatval($row['quantity']),
-                    'price'     => floatval($row['price']),
+                    'unit_name' => (string) $unit_view['unit_name'],
+                    'quantity'  => (float) $unit_view['quantity'],
+                    'price'     => floatval($row['price']) * max(1.0, (float) $unit_view['ratio']),
                     'is_gift'   => intval($row['local_ledger_item_gift_type'] ?? 0) === 1,
                 ];
             }

@@ -60,10 +60,27 @@ class TGS_Viettel_Invoice_Return_Adjustment
 
         $original = $this->find_original_invoice($sale_id);
         if (empty($original)) {
+            /*
+             * ─── ĐƠN CHƯA TỪNG CÓ HOÁ ĐƠN THUẾ ──────────────────────────────
+             *
+             * Không có hoá đơn gốc thì không có gì để điều chỉnh — bỏ qua bước
+             * thuế là ĐÚNG, không phải lỗi. Nhưng phải nói rõ lý do: nhân viên
+             * quen thấy màn "xem trước hoá đơn điều chỉnh" sau mỗi lần hoàn,
+             * lần này không thấy sẽ tưởng máy nuốt mất bước đó.
+             *
+             * Ba đường dẫn tới đây, đều bình thường:
+             *   • đơn toàn hàng mã Z
+             *   • mọi dòng đã bỏ tích nên không khai thuế
+             *   • nhân viên bấm "Hủy gửi thuế", chưa gửi lần nào
+             */
+            $message = 'Đơn bán này chưa từng phát hành hoá đơn thuế (hàng mã Z, dòng đã bỏ tích, '
+                . 'hoặc chưa gửi) nên không có hoá đơn nào để điều chỉnh. '
+                . 'Hàng và tiền đã hoàn xong, phần thuế không phải làm gì thêm.';
             $result['tax_adjustment'] = [
                 'status' => 'not_required',
-                'message' => 'Đơn chưa phát hành hóa đơn điện tử; không cần lập hóa đơn điều chỉnh.',
+                'message' => $message,
             ];
+            $result['message'] = trim((string) ($result['message'] ?? '')) . ' ' . $message;
             return;
         }
 
@@ -115,6 +132,27 @@ class TGS_Viettel_Invoice_Return_Adjustment
          * tác hoàn kho/tiền vẫn an toàn, còn API thuế không chạy "âm thầm".
          */
         $built = $this->build_payload($queue, $original);
+
+        /*
+         * ─── TRẢ ĐÚNG MẤY DÒNG VỐN KHÔNG KHAI THUẾ ──────────────────────────
+         *
+         * Hoá đơn gốc có thật, nhưng dòng khách trả lại chưa bao giờ nằm trên
+         * đó (quà sữa <24 tháng, hàng 0đ đã bỏ tích, mã Z). Không có gì để điều
+         * chỉnh — đây là chuyện bình thường, không phải lỗi.
+         *
+         * Bản trước báo đỏ "Hoàn kho/tiền đã xong nhưng…" và để lại một dòng
+         * trạng thái Lỗi nằm hoài ở màn Gửi thuế, kế toán tưởng có việc phải xử
+         * lý. Nay đóng gọn hàng chờ và nói đúng bản chất.
+         */
+        if (empty($built['success']) && ($built['reason'] ?? '') === 'no_invoiced_line') {
+            $message = 'Phần hàng trả lại vốn không nằm trên hoá đơn thuế (quà, hàng 0đ đã bỏ tích '
+                . 'hoặc mã Z) nên không cần lập hoá đơn điều chỉnh. Hàng và tiền đã hoàn xong.';
+            $this->update_queue($queue_id, ['status' => 'skipped', 'error_message' => $message]);
+            $result['tax_adjustment'] = ['id' => $queue_id, 'status' => 'not_required', 'message' => $message];
+            $result['message'] .= ' ' . $message;
+            return;
+        }
+
         if (empty($built['success'])) {
             $message = 'Hoàn kho/tiền đã xong nhưng ' . (string) ($built['message'] ?? 'không dựng được preview thuế.');
             $this->update_queue($queue_id, ['status' => 'error', 'error_message' => $message]);
@@ -459,7 +497,20 @@ class TGS_Viettel_Invoice_Return_Adjustment
         }
 
         if (empty($items)) {
-            return ['success' => false, 'message' => 'không có dòng hoàn nào từng xuất trên hóa đơn gốc'];
+            /*
+             * Không phải LỖI — là chuyện bình thường: khách trả lại đúng mấy
+             * dòng vốn không được khai thuế (quà sữa dưới 24 tháng, hàng 0đ
+             * đã bỏ tích, mã Z). Hoá đơn gốc chưa từng có mấy dòng đó thì
+             * chẳng có gì để điều chỉnh giảm.
+             *
+             * Gắn cờ riêng để chỗ gọi phân biệt được với lỗi thật, khỏi báo
+             * đỏ và khỏi để lại một dòng 'Lỗi' nằm hoài ở màn Gửi thuế.
+             */
+            return [
+                'success' => false,
+                'reason' => 'no_invoiced_line',
+                'message' => 'không có dòng hoàn nào từng xuất trên hóa đơn gốc',
+            ];
         }
 
         $issue_payload = json_decode((string) ($original['issue_request_payload'] ?? ''), true);
@@ -566,6 +617,8 @@ class TGS_Viettel_Invoice_Return_Adjustment
             'transaction_uuid' => $transaction_uuid,
             'totals' => ['total_before_tax' => $sum_before, 'total_tax' => $sum_tax, 'total_after_tax' => $sum_with_tax],
             'return_scope' => $is_full_return ? 'full' : 'partial',
+            // Mã phiếu hoàn — màn xem trước in ra để đối chiếu với chứng từ giấy
+            'return_code' => (string) ($return['local_ledger_code'] ?? ''),
         ];
     }
 
@@ -644,6 +697,35 @@ class TGS_Viettel_Invoice_Return_Adjustment
                 'adjustment_label' => 'Hóa đơn điều chỉnh giảm',
                 'original_invoice_no' => $this->original_invoice_id($original),
                 'reference' => (string) ($general['additionalReferenceDesc'] ?? ''),
+                /*
+                 * ─── ĐỦ DỮ LIỆU ĐỂ VẼ ĐÚNG TỜ HOÁ ĐƠN ĐIỀU CHỈNH ────────────
+                 *
+                 * Màn xem trước lúc trả hàng phải giống hệt màn xem trước lúc
+                 * bán — cùng bố cục tờ hoá đơn GTGT — để nhân viên không phải
+                 * học hai kiểu đọc. Riêng hoá đơn điều chỉnh thì có thêm khối
+                 * "Hoá đơn gốc" (mẫu số, ký hiệu, số, ngày), đúng như phần mềm
+                 * cũ vẫn hiện.
+                 */
+                'template_code' => (string) ($general['templateCode'] ?? ''),
+                'invoice_series' => (string) ($general['invoiceSeries'] ?? ''),
+                'original_template_code' => (string) ($original['template_code'] ?? ($general['templateCode'] ?? '')),
+                'original_invoice_series' => (string) ($original['invoice_series'] ?? ($general['invoiceSeries'] ?? '')),
+                'original_issue_date' => $this->format_issue_date($general['originalInvoiceIssueDate'] ?? 0),
+                'return_code' => (string) ($built['return_code'] ?? ''),
+                'buyer' => [
+                    'name' => (string) ($payload['buyerInfo']['buyerName'] ?? ''),
+                    'company_name' => (string) ($payload['buyerInfo']['buyerLegalName'] ?? ''),
+                    'tax_code' => (string) ($payload['buyerInfo']['buyerTaxCode'] ?? ''),
+                    'address' => (string) ($payload['buyerInfo']['buyerAddressLine'] ?? ''),
+                    'phone' => (string) ($payload['buyerInfo']['buyerPhoneNumber'] ?? ''),
+                ],
+                'seller' => [
+                    'name' => (string) get_bloginfo('name'),
+                    'tax_code' => (string) get_option('tgs_shop_tax_code', '---'),
+                    'address' => (string) get_option('tgs_shop_address', get_bloginfo('description')),
+                    'phone' => (string) get_option('tgs_shop_phone', ''),
+                ],
+                'payment_method_name' => (string) ($payload['payments'][0]['paymentMethodName'] ?? 'TM/CK'),
                 'items' => array_values(is_array($payload['itemInfo'] ?? null) ? $payload['itemInfo'] : []),
                 'tax_breakdowns' => array_values(is_array($payload['taxBreakdowns'] ?? null) ? $payload['taxBreakdowns'] : []),
                 'totals' => is_array($built['totals'] ?? null) ? $built['totals'] : [],
@@ -651,6 +733,16 @@ class TGS_Viettel_Invoice_Return_Adjustment
         ];
     }
 
+    /** Đổi mốc thời gian epoch (ms) của Viettel sang ngày cho người đọc */
+    private function format_issue_date($ms)
+    {
+        $ms = (float) $ms;
+        if ($ms <= 0) {
+            return '';
+        }
+
+        return date_i18n('d/m/Y', (int) round($ms / 1000));
+    }
     private function get_invoice_record($invoice_id)
     {
         if ($invoice_id <= 0 || !defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {

@@ -208,6 +208,146 @@ class TGS_Viettel_Invoice_Flow_Service
         return '';
     }
 
+    /** Các trường người mua được phép lưu kèm đơn để phát hành hoá đơn */
+    const INVOICE_BUYER_FIELDS = [
+        'customer_name',
+        'customer_company_name',
+        'customer_tax_code',
+        'customer_address',
+        'customer_phone',
+        'customer_email',
+    ];
+
+    /** Khoá trong meta của đơn giữ người mua đã chốt ở màn review */
+    const INVOICE_BUYER_META_KEY = 'tax_invoice_buyer';
+
+    /**
+     * Người mua đã chốt cho ĐƠN NÀY, đọc từ meta của đơn.
+     *
+     * Trả về mảng RỖNG khi chưa ai chốt — để chỗ gọi giữ nguyên khách của đơn.
+     * Chỉ nhận các trường có giá trị: lưu chuỗi rỗng đè lên tên khách thật thì
+     * hoá đơn ra trắng tên, tệ hơn là để nguyên "Khách lẻ".
+     */
+    private static function saved_invoice_buyer($sale_ledger_id, $meta_id)
+    {
+        global $wpdb;
+
+        $meta_id = intval($meta_id);
+        if ($meta_id <= 0 || !defined('TGS_TABLE_LOCAL_LEDGER_META')) {
+            return [];
+        }
+
+        $raw = $wpdb->get_var($wpdb->prepare(
+            'SELECT local_ledger_meta_value FROM ' . TGS_TABLE_LOCAL_LEDGER_META
+                . ' WHERE local_ledger_meta_id = %d LIMIT 1',
+            $meta_id
+        ));
+
+        $meta = json_decode((string) $raw, true);
+        if (!is_array($meta) || !is_array($meta[self::INVOICE_BUYER_META_KEY] ?? null)) {
+            return [];
+        }
+
+        $buyer = [];
+        foreach (self::INVOICE_BUYER_FIELDS as $field) {
+            $value = $meta[self::INVOICE_BUYER_META_KEY][$field] ?? '';
+            if (is_scalar($value) && trim((string) $value) !== '') {
+                $buyer[$field] = sanitize_text_field((string) $value);
+            }
+        }
+
+        return $buyer;
+    }
+
+    /** Bản công khai của saved_invoice_buyer() cho màn review gọi vào */
+    public static function public_saved_invoice_buyer($sale_ledger_id, $meta_id)
+    {
+        return self::saved_invoice_buyer($sale_ledger_id, $meta_id);
+    }
+    /**
+     * GHI NHỚ NGƯỜI MUA cho đơn, để lần gửi sau không phải gõ lại.
+     *
+     * Vì sao phải lưu: thông tin nhân viên gõ ở màn review trước giờ chỉ sống
+     * trong trình duyệt. Lần gửi đầu lỗi rồi gửi lại bằng cron / nút gửi lại ở
+     * trang quản trị là hoá đơn ra "Khách lẻ", vì những đường đó không có form
+     * để mà gõ.
+     *
+     * Vì sao KHÔNG ghi vào bảng khách: "Khách lẻ" là một bản ghi dùng chung cho
+     * hàng trăm đơn (đo trên dữ liệu thật: 334 đơn cùng trỏ vào một khách). Sửa
+     * vào đó là đổi luôn người mua của mọi đơn cũ.
+     *
+     * Cách lưu bám đúng nếp của tgs_pos: meta là bảng CHỈ THÊM DÒNG, ghi xong
+     * mới trỏ đơn sang dòng mới — lịch sử cũ giữ nguyên, không sửa đè.
+     */
+    public static function save_invoice_buyer_to_sale($sale_ledger_id, array $buyer)
+    {
+        global $wpdb;
+
+        $sale_ledger_id = intval($sale_ledger_id);
+        if ($sale_ledger_id <= 0 || !defined('TGS_TABLE_LOCAL_LEDGER') || !defined('TGS_TABLE_LOCAL_LEDGER_META')) {
+            return false;
+        }
+
+        $clean = [];
+        foreach (self::INVOICE_BUYER_FIELDS as $field) {
+            $value = $buyer[$field] ?? '';
+            if (is_scalar($value) && trim((string) $value) !== '') {
+                $clean[$field] = sanitize_text_field((string) $value);
+            }
+        }
+        if (empty($clean)) {
+            return false;
+        }
+
+        $meta_id = intval($wpdb->get_var($wpdb->prepare(
+            'SELECT local_ledger_meta_id FROM ' . TGS_TABLE_LOCAL_LEDGER
+                . ' WHERE local_ledger_id = %d LIMIT 1',
+            $sale_ledger_id
+        )));
+
+        $meta = [];
+        if ($meta_id > 0) {
+            $raw = $wpdb->get_var($wpdb->prepare(
+                'SELECT local_ledger_meta_value FROM ' . TGS_TABLE_LOCAL_LEDGER_META
+                    . ' WHERE local_ledger_meta_id = %d LIMIT 1',
+                $meta_id
+            ));
+            $decoded = json_decode((string) $raw, true);
+            if (is_array($decoded)) {
+                $meta = $decoded;
+            }
+        }
+
+        // Gõ lại lần sau chỉ đổi trường vừa gõ, không xoá trắng những trường cũ
+        $existing = is_array($meta[self::INVOICE_BUYER_META_KEY] ?? null)
+            ? $meta[self::INVOICE_BUYER_META_KEY]
+            : [];
+        $meta[self::INVOICE_BUYER_META_KEY] = array_merge($existing, $clean);
+
+        if ($meta[self::INVOICE_BUYER_META_KEY] === $existing) {
+            return true; // không có gì đổi, khỏi sinh thêm dòng meta
+        }
+
+        $now = current_time('mysql');
+        $inserted = $wpdb->insert(TGS_TABLE_LOCAL_LEDGER_META, [
+            'local_ledger_meta_value' => wp_json_encode($meta, JSON_UNESCAPED_UNICODE),
+            'user_id' => get_current_user_id(),
+            'is_deleted' => 0,
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+        if (!$inserted || intval($wpdb->insert_id) <= 0) {
+            return false;
+        }
+
+        $wpdb->update(
+            TGS_TABLE_LOCAL_LEDGER,
+            ['local_ledger_meta_id' => intval($wpdb->insert_id), 'updated_at' => $now],
+            ['local_ledger_id' => $sale_ledger_id]
+        );
+
+        return true;
+    }
     public function build_smart_payload_from_sale($sale_ledger_id)
     {
         global $wpdb;
@@ -229,7 +369,7 @@ class TGS_Viettel_Invoice_Flow_Service
 
         $sale = $wpdb->get_row(
             $wpdb->prepare(
-                'SELECT local_ledger_id, local_ledger_code, local_ledger_person_id, local_ledger_item_id, created_at FROM ' . TGS_TABLE_LOCAL_LEDGER . ' WHERE local_ledger_id = %d LIMIT 1',
+                'SELECT local_ledger_id, local_ledger_code, local_ledger_person_id, local_ledger_meta_id, local_ledger_item_id, created_at FROM ' . TGS_TABLE_LOCAL_LEDGER . ' WHERE local_ledger_id = %d LIMIT 1',
                 $sale_ledger_id
             ),
             ARRAY_A
@@ -270,6 +410,20 @@ class TGS_Viettel_Invoice_Flow_Service
             );
         }
 
+        /*
+         * ─── NGƯỜI MUA ĐÃ CHỐT Ở MÀN REVIEW ĐÈ LÊN KHÁCH CỦA ĐƠN ────────────
+         *
+         * Đơn bán thường gắn "Khách lẻ" — một bản ghi khách DÙNG CHUNG cho hàng
+         * trăm đơn. Khách nào cần hoá đơn thì nhân viên gõ tên/MST ở màn kiểm
+         * tra trước khi gửi thuế, và thông tin đó được lưu riêng cho ĐƠN NÀY
+         * (xem save_invoice_buyer_to_sale). Tuyệt đối không ghi vào bảng khách:
+         * sửa "Khách lẻ" là sửa luôn người mua của mọi đơn cũ.
+         *
+         * Nhờ lưu lại mà mọi đường phát hành đều dùng đúng người mua: gửi từ
+         * POS, gửi lại ở màn Gửi thuế, chạy tự động, hay gửi lại từ trang quản
+         * trị — không còn phụ thuộc vào việc nhân viên có gõ lại hay không.
+         */
+        $saved_buyer = self::saved_invoice_buyer($sale_ledger_id, $sale['local_ledger_meta_id'] ?? 0);
         // Lấy danh sách item_id từ cột JSON của phiếu bán hàng
         $item_ids_json = $sale['local_ledger_item_id'] ?? '';
         $item_ids = is_string($item_ids_json) ? json_decode($item_ids_json, true) : [];
@@ -472,14 +626,15 @@ class TGS_Viettel_Invoice_Flow_Service
                 'blog_id' => get_current_blog_id(),
                 'sale_ledger_id' => intval($sale['local_ledger_id']),
                 'sale_code' => (string) ($sale['local_ledger_code'] ?? ''),
-                'customer' => [
+                // Người mua đã chốt ở màn review thắng khách mặc định của đơn
+                'customer' => array_merge([
                     'customer_name' => (string) ($person['local_ledger_person_name'] ?? 'Khách lẻ'),
                     'customer_company_name' => (string) ($person['local_ledger_person_name'] ?? 'Khách lẻ'),
                     'customer_tax_code' => (string) ($person['local_ledger_person_tax_code'] ?? ''),
                     'customer_address' => (string) ($person['local_ledger_person_address'] ?? ''),
                     'customer_phone' => (string) ($person['local_ledger_person_phone'] ?? ''),
                     'customer_email' => (string) ($person['local_ledger_person_email'] ?? ''),
-                ],
+                ], $saved_buyer),
                 'items' => $source_items,
             ],
         ];
@@ -729,7 +884,31 @@ class TGS_Viettel_Invoice_Flow_Service
              * (thuế = tiền đã thu − tiền hàng trước thuế).
              */
             $without_tax = max(0, (int) round($line['tien_hang_sau_ck']));
-            $with_tax    = max(0, (int) round($line['thanh_tien']));
+
+            /*
+             * ─── TIỀN DÒNG PHẢI BẰNG ĐÚNG TIỀN LÚC BÁN ──────────────────────
+             *
+             * POS chốt tiền của dòng theo đúng công thức này:
+             *     thành tiền = làm_tròn(tiền hàng sau CK + TIỀN THUẾ ĐÃ LƯU)
+             * (xem TGS_POS_Order_Handler — cột local_ledger_item_tax_amount).
+             *
+             * Bản cũ ở đây lại TÍNH LẠI tiền thuế từ thuế suất:
+             *     thành tiền = làm_tròn(tiền hàng sau CK × (1 + thuế%))
+             *
+             * Hai cách chênh nhau 1đ mỗi khi chiết khấu có phần lẻ. Ví dụ thật:
+             * hàng 450.000 giảm còn 430.000 → CK trước thuế 18.518,52 lưu thành
+             * 18.519 → tính lại ra 429.999, trong khi khách trả 430.000. Kế toán
+             * đối chiếu bill với hoá đơn là lệch ngay, mà hoá đơn phát hành rồi
+             * thì không sửa được.
+             *
+             * Nên NEO VÀO TIỀN THUẾ ĐÃ LƯU, đúng như lúc bán. Dòng nào chưa có
+             * (đơn cũ) thì mới rơi về cách tính lại.
+             */
+            $stored_tax_raw = (float) ($item['stored_tax_amount'] ?? 0);
+            $with_tax = $stored_tax_raw > 0
+                ? max(0, (int) round($line['tien_hang_sau_ck'] + $stored_tax_raw))
+                : max(0, (int) round($line['thanh_tien']));
+
             $tax_amount  = max(0, $with_tax - $without_tax);
 
             /*

@@ -1354,7 +1354,7 @@ class TGS_Viettel_Invoice_Plugin
 
         // Lấy item_ids + thông tin phiếu bán (bao gồm code + ngày + person_id cho preview)
         $sale = $wpdb->get_row(
-            $wpdb->prepare('SELECT local_ledger_item_id, local_ledger_code, local_ledger_person_id, created_at FROM ' . TGS_TABLE_LOCAL_LEDGER . ' WHERE local_ledger_id = %d LIMIT 1', $sale_ledger_id),
+            $wpdb->prepare('SELECT local_ledger_item_id, local_ledger_code, local_ledger_person_id, local_ledger_meta_id, created_at FROM ' . TGS_TABLE_LOCAL_LEDGER . ' WHERE local_ledger_id = %d LIMIT 1', $sale_ledger_id),
             ARRAY_A
         );
 
@@ -1399,6 +1399,30 @@ class TGS_Viettel_Invoice_Plugin
             }
         }
 
+        /*
+         * Người mua đã chốt cho ĐƠN NÀY (nếu có) thắng khách mặc định.
+         * Mở lại màn review là thấy đúng thông tin lần trước đã gõ, khỏi gõ lại
+         * — và khớp với thứ thực sự sẽ khai lên hoá đơn.
+         */
+        if (method_exists('TGS_Viettel_Invoice_Flow_Service', 'public_saved_invoice_buyer')) {
+            $saved_buyer = TGS_Viettel_Invoice_Flow_Service::public_saved_invoice_buyer(
+                $sale_ledger_id,
+                $sale['local_ledger_meta_id'] ?? 0
+            );
+            $map = [
+                'customer_name' => 'name',
+                'customer_company_name' => 'company_name',
+                'customer_tax_code' => 'tax_code',
+                'customer_address' => 'address',
+                'customer_phone' => 'phone',
+                'customer_email' => 'email',
+            ];
+            foreach ($map as $from => $to) {
+                if (!empty($saved_buyer[$from])) {
+                    $preview_customer[$to] = $saved_buyer[$from];
+                }
+            }
+        }
         // Kiểm tra column is_under24_promo_danger tồn tại không
         $has_danger_col = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_is_under24_promo_danger');
         $danger_col_sql = $has_danger_col ? ', i.local_ledger_item_is_under24_promo_danger' : '';
@@ -1973,6 +1997,10 @@ class TGS_Viettel_Invoice_Plugin
         }
 
         $customer_override = $this->parse_customer_override_from_post();
+        if (!empty($customer_override)
+            && method_exists('TGS_Viettel_Invoice_Flow_Service', 'save_invoice_buyer_to_sale')) {
+            TGS_Viettel_Invoice_Flow_Service::save_invoice_buyer_to_sale($sale_ledger_id, $customer_override);
+        }
 
         $flow_result = $this->run_auto_issue_cqt_flow([
             'sale_ledger_id' => $sale_ledger_id,
@@ -3415,6 +3443,17 @@ class TGS_Viettel_Invoice_Plugin
                 $source_result['payload']['customer'][$field] = $value;
             }
 
+            /*
+             * Ghi nhớ người mua vào chính đơn này. Trước đây thông tin chỉ
+             * sống trong trình duyệt: gửi lần đầu lỗi rồi gửi lại bằng cron
+             * hay nút gửi lại ở trang quản trị là hoá đơn ra "Khách lẻ", vì
+             * mấy đường đó không có form để nhân viên gõ lại.
+             */
+            if (!empty($customer_override)
+                && method_exists('TGS_Viettel_Invoice_Flow_Service', 'save_invoice_buyer_to_sale')) {
+                TGS_Viettel_Invoice_Flow_Service::save_invoice_buyer_to_sale($sale_ledger_id, $customer_override);
+            }
+
             // Áp dụng danh sách loại trừ trực tiếp từ frontend (source of truth).
             // Xoá hết flag danger trước, rồi set true chỉ cho item trong danh sách loại trừ.
             $excluded_ids_raw = sanitize_text_field($_POST['excluded_item_ids'] ?? '');
@@ -3520,6 +3559,13 @@ class TGS_Viettel_Invoice_Plugin
                 'total_after_tax' => floatval($issue_payload_result['totals']['total_after_tax'] ?? 0),
                 'template_code' => sanitize_text_field($issue_payload['generalInvoiceInfo']['templateCode'] ?? ''),
                 'invoice_series' => sanitize_text_field($issue_payload['generalInvoiceInfo']['invoiceSeries'] ?? ''),
+                // Số hoá đơn Viettel vừa cấp — nguồn duy nhất cho phiếu điều chỉnh sau này
+                'viettel_invoice_no' => sanitize_text_field($this->deep_pick($issue_result['response'] ?? [], [
+                    'result.invoiceNo', 'data.invoiceNo', 'invoiceNo', 'invoiceNumber',
+                ])),
+                'viettel_invoice_id' => sanitize_text_field($this->deep_pick($issue_result['response'] ?? [], [
+                    'result.invoiceId', 'data.invoiceId', 'invoiceId',
+                ])),
                 'buyer_name' => sanitize_text_field($issue_payload['buyerInfo']['buyerName'] ?? ''),
                 'buyer_tax_code' => sanitize_text_field($issue_payload['buyerInfo']['buyerTaxCode'] ?? ''),
                 'updated_at' => current_time('mysql'),
@@ -3857,6 +3903,13 @@ class TGS_Viettel_Invoice_Plugin
             'total_after_tax' => floatval($issue_payload_result['totals']['total_after_tax'] ?? 0),
             'template_code' => sanitize_text_field($issue_payload['generalInvoiceInfo']['templateCode'] ?? ''),
             'invoice_series' => sanitize_text_field($issue_payload['generalInvoiceInfo']['invoiceSeries'] ?? ''),
+            // Số hoá đơn Viettel vừa cấp — nguồn duy nhất cho phiếu điều chỉnh sau này
+            'viettel_invoice_no' => sanitize_text_field($this->deep_pick($issue_result['response'] ?? [], [
+                'result.invoiceNo', 'data.invoiceNo', 'invoiceNo', 'invoiceNumber',
+            ])),
+            'viettel_invoice_id' => sanitize_text_field($this->deep_pick($issue_result['response'] ?? [], [
+                'result.invoiceId', 'data.invoiceId', 'invoiceId',
+            ])),
             'buyer_name' => sanitize_text_field($issue_payload['buyerInfo']['buyerName'] ?? ''),
             'buyer_tax_code' => sanitize_text_field($issue_payload['buyerInfo']['buyerTaxCode'] ?? ''),
             'updated_at' => current_time('mysql'),

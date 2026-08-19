@@ -61,29 +61,37 @@ class TGS_Viettel_Invoice_Return_Adjustment
         $original = $this->find_original_invoice($sale_id);
         if (empty($original)) {
             /*
-             * ─── ĐƠN CHƯA TỪNG CÓ HOÁ ĐƠN THUẾ ──────────────────────────────
+             * ─── CHƯA CÓ HOÁ ĐƠN GỐC: VẪN PHẢI LƯU PHIẾU ĐIỀU CHỈNH ─────────
              *
-             * Không có hoá đơn gốc thì không có gì để điều chỉnh — bỏ qua bước
-             * thuế là ĐÚNG, không phải lỗi. Nhưng phải nói rõ lý do: nhân viên
-             * quen thấy màn "xem trước hoá đơn điều chỉnh" sau mỗi lần hoàn,
-             * lần này không thấy sẽ tưởng máy nuốt mất bước đó.
+             * Đơn bán chưa gửi thuế (bỏ tích hết, hàng mã Z, hoặc bấm hoãn gửi)
+             * thì lúc này chưa điều chỉnh được. NHƯNG không được im lặng bỏ qua:
+             * mai kia đơn bán được gửi thuế thì phiếu hoàn này vẫn phải điều
+             * chỉnh, mà lúc đó không còn ai nhớ ra.
              *
-             * Ba đường dẫn tới đây, đều bình thường:
-             *   • đơn toàn hàng mã Z
-             *   • mọi dòng đã bỏ tích nên không khai thuế
-             *   • nhân viên bấm "Hủy gửi thuế", chưa gửi lần nào
+             * Nên vẫn ghi một hàng chờ ở trạng thái "chờ kế toán". Nó nằm trong
+             * màn Danh sách gửi hoá đơn thuế, có nút gửi lại — bấm lại lúc hoá
+             * đơn gốc đã có là chạy tiếp bình thường.
+             *
+             * Hoàn kho và hoàn tiền cho khách KHÔNG bị ảnh hưởng, đã xong trước
+             * khi vào đây.
              */
-            $message = 'Đơn bán này chưa từng phát hành hoá đơn thuế (hàng mã Z, dòng đã bỏ tích, '
-                . 'hoặc chưa gửi) nên không có hoá đơn nào để điều chỉnh. '
-                . 'Hàng và tiền đã hoàn xong, phần thuế không phải làm gì thêm.';
+            $message = 'Đơn bán chưa phát hành hoá đơn thuế nên chưa lập được hoá đơn điều chỉnh. '
+                . 'Hàng và tiền đã hoàn xong. Phiếu điều chỉnh được lưu ở màn Gửi thuế, '
+                . 'gửi lại khi đơn bán đã có hoá đơn.';
+
+            $queue_id = $this->upsert_queue($return_id, $sale_id, [], 'blocked', intval($args['operator_id'] ?? 0));
+            if ($queue_id > 0) {
+                $this->update_queue($queue_id, ['error_message' => $message]);
+            }
+
             $result['tax_adjustment'] = [
-                'status' => 'not_required',
+                'id' => $queue_id,
+                'status' => 'blocked',
                 'message' => $message,
             ];
             $result['message'] = trim((string) ($result['message'] ?? '')) . ' ' . $message;
             return;
         }
-
         $issue_status = intval($original['issue_status'] ?? 0);
         $cqt_status = intval($original['send_cqt_status'] ?? 0);
         $invoice_state = sanitize_key($original['invoice_state'] ?? '');

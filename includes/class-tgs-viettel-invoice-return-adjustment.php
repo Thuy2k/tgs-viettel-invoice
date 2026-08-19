@@ -466,7 +466,31 @@ class TGS_Viettel_Invoice_Return_Adjustment
 
             $money_line = $money::line($quantity, $unit_price, 0, $tax_percent);
             $before   = max(0, (int) round($money_line['tien_hang_sau_ck']));
-            $with_tax = max(0, (int) round($money_line['thanh_tien']));
+
+            /*
+             * ─── TIỀN ĐIỀU CHỈNH PHẢI KHỚP DÒNG TRÊN HOÁ ĐƠN GỐC ────────────
+             *
+             * Hoá đơn gốc chốt tiền dòng bằng: làm_tròn(tiền hàng sau CK +
+             * TIỀN THUẾ ĐÃ LƯU lúc bán). Ở đây nếu tính lại thuế từ thuế suất
+             * thì lệch 1đ mỗi khi chiết khấu có phần lẻ — hoàn hết một dòng
+             * 430.000 mà xin điều chỉnh giảm 429.999, cơ quan thuế đối chiếu
+             * gốc với điều chỉnh là thấy ngay.
+             *
+             * Nên suy từ chính tiền thuế đã lưu của dòng gốc, nhân theo TỈ LỆ
+             * HOÀN. Hoàn hết thì tỉ lệ = 1 và ra đúng con số của hoá đơn gốc.
+             * Dòng gốc chưa lưu tiền thuế (đơn cũ) mới rơi về cách tính lại.
+             */
+            $source_qty = max(0.0, floatval($source['quantity'] ?? 0));
+            $source_tax = floatval($source['stored_tax_amount'] ?? 0);
+            $ty_le_hoan = $source_qty > 0 ? ($quantity / $source_qty) : 0.0;
+
+            if ($source_tax > 0 && $ty_le_hoan > 0) {
+                $source_line_total = floatval($source['line_total'] ?? 0) + $source_tax;
+                $with_tax = max(0, (int) round($source_line_total * $ty_le_hoan));
+            } else {
+                $with_tax = max(0, (int) round($money_line['thanh_tien']));
+            }
+
             $tax      = max(0, $with_tax - $before);
             $items[] = [
                 'lineNumber' => $line++,

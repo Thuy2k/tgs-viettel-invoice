@@ -33,6 +33,39 @@ class TGS_Viettel_Invoice_Flow_Service
         return ($raw === null || $raw === '') ? null : floatval($raw);
     }
 
+    /*
+     * ─── KCT: MÃ THUẾ SUẤT GỬI CHO VIETTEL ────────────────────────────────────
+     *
+     * Hàng KHÔNG CHỊU THUẾ không phải "thuế suất 0%" — hai thứ kê khai khác
+     * nhau. Viettel nhận mã ÂM ở `taxPercentage` để diễn đạt chuyện này.
+     *
+     * ĐÃ THỬ TRÊN HÓA ĐƠN THẬT (24/08/2026, ký hiệu 1C26TNH số 13937):
+     *
+     *     -1  →  KKKNT  (không kê khai nộp thuế)   ← KHÔNG phải cái ta cần
+     *     -2  →  KCT    (không chịu thuế)
+     *
+     * Gửi -1 thì hoá đơn in ra chữ "KKKNT" và dòng tổng
+     * "Tổng tiền không chịu thuế" bỏ trống — sai bản chất kê khai.
+     *
+     * Đổi được bằng filter nếu Viettel đổi quy ước, không phải sửa code:
+     *
+     *     add_filter('tgs_viettel_invoice_kct_tax_code', fn() => -1);
+     */
+    const KCT_TAX_CODE = -2;
+
+    /** Mã thuế suất dùng cho dòng không chịu thuế. */
+    public static function kct_tax_code()
+    {
+        return (float) apply_filters('tgs_viettel_invoice_kct_tax_code', self::KCT_TAX_CODE);
+    }
+
+    /** Dòng này có phải hàng không chịu thuế không. */
+    public static function is_kct_line($item)
+    {
+        $item = (array) $item;
+        return (int) ($item['is_kct'] ?? $item['local_ledger_item_is_kct'] ?? 0) === 1;
+    }
+
     /**
      * Tìm những dòng chưa khai thuế suất.
      *
@@ -506,6 +539,10 @@ class TGS_Viettel_Invoice_Flow_Service
         $optional_selects[] = $has_global_product_name_id ? 'i.global_product_name_id' : '0 AS global_product_name_id';
         $optional_selects[] = $has_local_product_sku ? 'i.local_product_sku' : "'' AS local_product_sku";
         $optional_selects[] = $has_tax_percent ? 'i.local_ledger_item_tax_percent' : 'NULL AS local_ledger_item_tax_percent';
+        // Cờ KCT khoá lúc bán — chưa có cột (DB cũ) thì coi như có chịu thuế.
+        $optional_selects[] = $this->local_ledger_item_column_exists('local_ledger_item_is_kct')
+            ? 'i.local_ledger_item_is_kct'
+            : '0 AS local_ledger_item_is_kct';
         $optional_selects[] = $has_tax_amount ? 'i.local_ledger_item_tax_amount' : '0 AS local_ledger_item_tax_amount';
 
         // ĐVT lúc bán — hoá đơn khai theo ĐVT này, xem sale_unit_view()
@@ -648,6 +685,8 @@ class TGS_Viettel_Invoice_Flow_Service
                 'discount_percent' => (float) $line['ck_phan_tram'],
                 'line_total' => (float) $line['tien_hang_sau_ck'],
                 'tax_percent' => self::tax_percent_of($item['local_ledger_item_tax_percent'] ?? null),
+                // KCT khác mức 0% — xem tgs_shop_management/docs/quan-ly-thue-suat.md
+                'is_kct' => (int) ($item['local_ledger_item_is_kct'] ?? 0) === 1 ? 1 : 0,
             ];
         }
 
@@ -894,6 +933,16 @@ class TGS_Viettel_Invoice_Flow_Service
             $unit_price = max(0.0, floatval($item['unit_price_after_discount'] ?? 0));
             $tax_percent = self::tax_percent_of($item['tax_percent'] ?? null);
 
+            /*
+             * Hàng KHÔNG CHỊU THUẾ: tiền thuế bằng 0 (tính như 0%), nhưng mã
+             * `taxPercentage` gửi cho Viềttel phải là mã KCT riêng, không phải số 0
+             * — gửi 0 là khai thành "thuế suất 0%", sai bản chất.
+             */
+            $is_kct = self::is_kct_line($item);
+            if ($is_kct) {
+                $tax_percent = 0.0;
+            }
+
             if (!empty($item['is_gift'])) {
                 $unit_price = 0.0;
             }
@@ -995,10 +1044,14 @@ class TGS_Viettel_Invoice_Flow_Service
             $sum_tax         += $tax_amount;
             $sum_with_tax    += $with_tax;
 
-            $key = (string) $tax_percent;
+            // Mã gửi cho Viettel: KCT dùng mã riêng, còn lại là chính mức thuế.
+            $api_tax_code = $is_kct ? self::kct_tax_code() : $tax_percent;
+
+            // Nhóm KCT phải đứng RIÊNG với nhóm 0% trong bảng tổng hợp thuế.
+            $key = (string) $api_tax_code;
             if (!isset($tax_breakdown_map[$key])) {
                 $tax_breakdown_map[$key] = [
-                    'taxPercentage' => $tax_percent,
+                    'taxPercentage' => $api_tax_code,
                     'taxableAmount' => 0,
                     'taxAmount' => 0,
                 ];
@@ -1025,7 +1078,7 @@ class TGS_Viettel_Invoice_Flow_Service
                 'itemTotalAmountWithoutTax' => $without_tax,
                 'itemTotalAmountAfterDiscount' => $without_tax,
                 'itemTotalAmountWithTax' => $with_tax,
-                'taxPercentage' => $tax_percent,
+                'taxPercentage' => $api_tax_code,
                 'taxAmount' => $tax_amount,
                 'itemNote' => !empty($item['is_gift']) ? 'Hàng tặng khuyến mãi' : null,
                 'isIncreaseItem' => null,

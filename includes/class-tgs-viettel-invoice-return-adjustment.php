@@ -447,6 +447,19 @@ class TGS_Viettel_Invoice_Return_Adjustment
             }
 
             /*
+             * Hoá đơn điều chỉnh giảm phải kê khai GIỐNG hoá đơn gốc. Cờ KCT
+             * đọc từ chính payload đã gửi lần đầu (smart_filtered_payload), không đọc
+             * lại catalog — catalog đổi sau đó thì điều chỉnh vẫn phải bám bản gốc.
+             */
+            $is_kct = TGS_Viettel_Invoice_Flow_Service::is_kct_line($source);
+            $api_tax_code = $is_kct
+                ? TGS_Viettel_Invoice_Flow_Service::kct_tax_code()
+                : $tax_percent;
+            if ($is_kct) {
+                $tax_percent = 0.0;
+            }
+
+            /*
              * Dựng tiền GIỐNG HỆT hoá đơn gốc, chỉ đổi số lượng thành số lượng
              * hoàn: cùng đơn giá đã khai, cùng lớp tính tiền, cùng cách neo vào
              * tiền khách trả (with_tax làm tròn từ `thanh_tien`, thuế là hiệu).
@@ -506,16 +519,17 @@ class TGS_Viettel_Invoice_Return_Adjustment
                 'itemTotalAmountWithoutTax' => $before,
                 'itemTotalAmountAfterDiscount' => $before,
                 'itemTotalAmountWithTax' => $with_tax,
-                'taxPercentage' => $tax_percent,
+                'taxPercentage' => $api_tax_code,
                 'taxAmount' => $tax,
                 'isIncreaseItem' => false,
                 'itemNote' => 'Điều chỉnh giảm do trả hàng - ' . (string) ($return['local_ledger_code'] ?? ''),
             ];
 
-            $key = (string) $tax_percent;
+            // Nhóm KCT đứng riêng với nhóm 0% trong bảng tổng hợp thuế.
+            $key = (string) $api_tax_code;
             if (!isset($tax_breakdowns[$key])) {
                 $tax_breakdowns[$key] = [
-                    'taxPercentage' => $tax_percent,
+                    'taxPercentage' => $api_tax_code,
                     'taxableAmount' => 0,
                     'taxAmount' => 0,
                     'taxableAmountPos' => false,

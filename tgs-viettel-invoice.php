@@ -1435,6 +1435,10 @@ class TGS_Viettel_Invoice_Plugin
         $sku_sql = $has_local_product_sku ? ', i.local_product_sku' : ", '' AS local_product_sku";
         $has_tax_percent = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_tax_percent');
         $tax_percent_sql = $has_tax_percent ? ', i.local_ledger_item_tax_percent' : ', 0 AS local_ledger_item_tax_percent';
+        // Cờ KCT khoá lúc bán — DB cũ chưa có cột thì coi như có chịu thuế.
+        $tax_percent_sql .= $this->flow_service->local_ledger_item_column_exists('local_ledger_item_is_kct')
+            ? ', i.local_ledger_item_is_kct'
+            : ', 0 AS local_ledger_item_is_kct';
         $has_discount_amount = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_discount_amount');
         $discount_amount_sql = $has_discount_amount ? ', i.local_ledger_item_discount_amount' : ', 0 AS local_ledger_item_discount_amount';
         $has_tax_amount = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_tax_amount');
@@ -1560,6 +1564,8 @@ class TGS_Viettel_Invoice_Plugin
                 'discount_amount'         => $disc_amount,
                 'price_after_discount'    => $price_after_disc,
                 'tax_percent'             => $tax_percent,
+                // KCT khác mức 0% — màn xem trước phải hiện "KCT", không phải "0%"
+                'is_kct'                  => (int) ($row['local_ledger_item_is_kct'] ?? 0) === 1 ? 1 : 0,
                 'tax_amount'              => $tax_amount,
                 'is_gift'                 => $is_gift,
                 'is_under24_promo_danger' => $danger,

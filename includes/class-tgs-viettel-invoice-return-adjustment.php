@@ -499,10 +499,10 @@ class TGS_Viettel_Invoice_Return_Adjustment
                 'itemName' => (string) ($source['item_name'] ?? ''),
                 'unitName' => (string) ($source['unit_name'] ?? ''),
                 'quantity' => $quantity,
-                // Tối đa 4 số thập phân, xem chú thích ở
-                // TGS_Viettel_Invoice_Flow_Service: lẻ hơn là Viettel trả về
-                // INVALID_DECIMAL_POINT_PRICE và không phát hành được.
-                'unitPrice' => (float) sprintf('%.4F', $unit_price),
+                // Số chữ số thập phân do Viettel cấu hình, xem
+                // TGS_Viettel_Invoice_Flow_Service::unit_price_decimals(): lẻ
+                // hơn là trả INVALID_DECIMAL_POINT_PRICE, không phát hành được.
+                'unitPrice' => TGS_Viettel_Invoice_Flow_Service::api_unit_price($unit_price),
                 'itemTotalAmountWithoutTax' => $before,
                 'itemTotalAmountAfterDiscount' => $before,
                 'itemTotalAmountWithTax' => $with_tax,

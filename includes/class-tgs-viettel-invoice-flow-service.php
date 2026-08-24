@@ -208,6 +208,59 @@ class TGS_Viettel_Invoice_Flow_Service
         return '';
     }
 
+    /**
+     * ─── SỐ CHỮ SỐ THẬP PHÂN CỦA ĐƠN GIÁ GỬI THUẾ ───────────────────────────
+     *
+     * Viettel chặn payload có đơn giá lẻ hơn mức cấu hình của người nộp thuế:
+     *   {"code":400,"message":"INVALID_DECIMAL_POINT_PRICE",
+     *    "data":"Đơn giá của hàng hóa có phần thập phân tối đa N ký tự"}
+     *
+     * Con số N KHÔNG cố định: nó là cấu hình "số chữ số thập phân của đơn giá"
+     * bên phía Viettel/CQT. Trước đây N = 4, từ 24/08/2026 hệ thống trả về
+     * N = 0 — tức đơn giá phải là số nguyên. Vì vậy để một chỗ duy nhất, đổi
+     * hằng số (hoặc móc filter) là cả hoá đơn gốc lẫn hoá đơn điều chỉnh cùng
+     * đổi theo, không phải đi sửa từng chỗ rồi lệch nhau.
+     *
+     * KHÔNG ảnh hưởng số tiền: ba con số quyết định của dòng
+     * (itemTotalAmountWithoutTax / WithTax / taxAmount) đã chốt theo đúng số
+     * khách trả, unitPrice chỉ là số hiển thị trên tờ hoá đơn.
+     */
+    const UNIT_PRICE_DECIMALS = 0;
+
+    public static function unit_price_decimals()
+    {
+        $decimals = (int) apply_filters(
+            'tgs_viettel_invoice_unit_price_decimals',
+            self::UNIT_PRICE_DECIMALS
+        );
+
+        return max(0, min(4, $decimals));
+    }
+
+    /**
+     * Đơn giá đã cắt về đúng số chữ số thập phân Viettel cho phép.
+     *
+     * round() trước cho ra cách làm tròn nhất quán (0,5 lên trên), rồi sprintf
+     * và ép kiểu lại: với server đặt serialize_precision cao, chỉ round(x, 4)
+     * không thôi vẫn có thể bị json_encode in ra 32407.416700000001 — đúng cái
+     * lỗi cần tránh.
+     *
+     * Không cho phép thập phân thì trả về HẲN số nguyên, để json_encode chắc
+     * chắn in "32407" chứ không phải "32407.0" — dấu chấm với một chữ số 0
+     * đằng sau cũng đủ để phía Viettel đếm thành 1 ký tự thập phân.
+     */
+    public static function api_unit_price($unit_price)
+    {
+        $decimals = self::unit_price_decimals();
+        $value    = round(max(0.0, (float) $unit_price), $decimals);
+
+        if ($decimals === 0) {
+            return (int) $value;
+        }
+
+        return (float) sprintf('%.' . $decimals . 'F', $value);
+    }
+
     /** Các trường người mua được phép lưu kèm đơn để phát hành hoá đơn */
     const INVOICE_BUYER_FIELDS = [
         'customer_name',
@@ -962,26 +1015,13 @@ class TGS_Viettel_Invoice_Flow_Service
                 'unitName' => (string) ($item['unit_name'] ?? ''),
                 'quantity' => $quantity,
                 /*
-                 * ─── ĐƠN GIÁ TỐI ĐA 4 CHỮ SỐ THẬP PHÂN ──────────────────────
-                 *
-                 * Viettel từ chối payload có đơn giá lẻ hơn 4 số:
-                 *   {"code":400,"message":"INVALID_DECIMAL_POINT_PRICE",
-                 *    "data":"Đơn giá của hàng hóa có phần thập phân tối đa 4 ký tự"}
-                 *
                  * Đơn giá ở đây là tiền hàng sau CK chia cho số lượng, nên rất
                  * hay ra số vô hạn tuần hoàn — đơn HD80_N59XC: 388.889 / 12 =
-                 * 32.407,41666… Bản cũ làm tròn 6 số nên bị chặn.
-                 *
-                 * KHÔNG ảnh hưởng tiền: ba con số quyết định của dòng
-                 * (itemTotalAmountWithoutTax / WithTax / taxAmount) đã được chốt
-                 * ở trên theo đúng số khách trả, unitPrice chỉ là số hiển thị.
-                 * Chênh do làm tròn ở mức 0,0001đ × số lượng, không tới 1đ.
-                 *
-                 * Dùng sprintf rồi ép lại float thay vì round(): với server đặt
-                 * serialize_precision cao, round(x, 4) vẫn có thể bị json_encode
-                 * in ra 32407.416700000001 — đúng cái lỗi cần tránh.
+                 * 32.407,41666… Viettel chỉ nhận đơn giá đúng số chữ số thập
+                 * phân họ cấu hình, lẻ hơn là trả INVALID_DECIMAL_POINT_PRICE.
+                 * Xem unit_price_decimals().
                  */
-                'unitPrice' => (float) sprintf('%.4F', $unit_price),
+                'unitPrice' => self::api_unit_price($unit_price),
                 'itemTotalAmountWithoutTax' => $without_tax,
                 'itemTotalAmountAfterDiscount' => $without_tax,
                 'itemTotalAmountWithTax' => $with_tax,

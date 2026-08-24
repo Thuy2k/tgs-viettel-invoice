@@ -53,6 +53,64 @@ class TGS_Viettel_Invoice_Flow_Service
      */
     const KCT_TAX_CODE = -2;
 
+    /*
+     * ─── KHÁCH LẺ: TÊN NGƯỜI MUA TRÊN HOÁ ĐƠN ────────────────────────────────
+     *
+     * Bán lẻ không lấy thông tin khách thì hoá đơn phải ghi
+     * "Bán cho người tiêu dùng" ở CẢ hai dòng: *Họ tên người mua hàng*
+     * và *Tên đơn vị*. Ghi "Khách lẻ" là tên nội bộ của phần mềm, không phải
+     * cách kê khai.
+     *
+     * Chỉ áp dụng khi THẬT SỰ là khách lẻ: không có mã số thuế, và tên để trống
+     * hoặc đang là nhãn mặc định. Khách có khai tên thật thì giữ nguyên tên họ.
+     */
+    const RETAIL_BUYER_LABEL = 'Bán cho người tiêu dùng';
+
+    /** Nhãn người mua cho khách lẻ. Đổi được bằng filter. */
+    public static function retail_buyer_label()
+    {
+        $label = apply_filters('tgs_viettel_invoice_retail_buyer_label', self::RETAIL_BUYER_LABEL);
+        $label = trim((string) $label);
+
+        return $label !== '' ? $label : self::RETAIL_BUYER_LABEL;
+    }
+
+    /**
+     * Khách này có phải khách lẻ không.
+     *
+     * Có mã số thuế ⇒ không phải khách lẻ, dù tên là gì.
+     * Còn lại: tên rỗng hoặc trùng một trong các nhãn mặc định thì là khách lẻ.
+     *
+     * @param array $customer
+     * @return bool
+     */
+    public static function is_retail_buyer($customer)
+    {
+        $customer = (array) $customer;
+
+        if (trim((string) ($customer['customer_tax_code'] ?? '')) !== '') {
+            return false;
+        }
+
+        $name = trim((string) ($customer['customer_name'] ?? ''));
+        if ($name === '') {
+            return true;
+        }
+
+        // remove_accents() của WordPress xử lý được tiếng Việt có dấu.
+        $folded = function_exists('remove_accents') ? remove_accents($name) : $name;
+        $folded = strtolower(preg_replace('/\s+/', ' ', trim($folded)));
+
+        $placeholders = [
+            'khach le',
+            'khach hang le',
+            'khach vang lai',
+            'khach lẻ',
+        ];
+
+        return in_array($folded, $placeholders, true);
+    }
+
     /** Mã thuế suất dùng cho dòng không chịu thuế. */
     public static function kct_tax_code()
     {
@@ -1101,6 +1159,10 @@ class TGS_Viettel_Invoice_Flow_Service
             $payment_method_name = 'TM/CK';
         }
 
+        // Bán lẻ không lấy thông tin khách ⇒ ghi "Bán cho người tiêu dùng".
+        $is_retail_buyer    = self::is_retail_buyer($customer);
+        $retail_buyer_label = self::retail_buyer_label();
+
         $payload = [
             'local_ledger_code' => (string) ($filtered_payload['sale_code'] ?? ''),
             'generalInvoiceInfo' => [
@@ -1116,8 +1178,16 @@ class TGS_Viettel_Invoice_Flow_Service
                 'transactionUuid' => null,
             ],
             'buyerInfo' => [
-                'buyerName' => (string) ($customer['customer_name'] ?? 'Khách lẻ'),
-                'buyerLegalName' => (string) ($customer['customer_company_name'] ?? ''),
+                /*
+                 * Khách lẻ ⇒ cả hai dòng đều ghi "Bán cho người tiêu dùng",
+                 * không ghi "Khách lẻ" — xem is_retail_buyer().
+                 */
+                'buyerName' => $is_retail_buyer
+                    ? $retail_buyer_label
+                    : (string) ($customer['customer_name'] ?? ''),
+                'buyerLegalName' => $is_retail_buyer
+                    ? $retail_buyer_label
+                    : (string) ($customer['customer_company_name'] ?? ''),
                 'buyerTaxCode' => (string) ($customer['customer_tax_code'] ?? ''),
                 'buyerAddressLine' => (string) ($customer['customer_address'] ?? ''),
                 'buyerPhoneNumber' => (string) ($customer['customer_phone'] ?? ''),

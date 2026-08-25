@@ -340,16 +340,167 @@ class TGS_Viettel_Invoice_Flow_Service
      * chắn in "32407" chứ không phải "32407.0" — dấu chấm với một chữ số 0
      * đằng sau cũng đủ để phía Viettel đếm thành 1 ký tự thập phân.
      */
-    public static function api_unit_price($unit_price)
+    public static function api_unit_price($unit_price, $lam_tron_len = false)
     {
         $decimals = self::unit_price_decimals();
-        $value    = round(max(0.0, (float) $unit_price), $decimals);
+
+        if ($lam_tron_len) {
+            /*
+             * round() trước ở mức 6 chữ số để phần lẻ nhị phân không đẩy một
+             * đơn giá vốn đã chẵn lên thêm một đồng (33.334,0000000001).
+             */
+            $factor = pow(10, $decimals);
+            $value  = ceil(round(max(0.0, (float) $unit_price) * $factor, 6)) / $factor;
+        } else {
+            $value = round(max(0.0, (float) $unit_price), $decimals);
+        }
 
         if ($decimals === 0) {
             return (int) $value;
         }
 
         return (float) sprintf('%.' . $decimals . 'F', $value);
+    }
+
+    /**
+     * ─── BA SỐ CỦA DÒNG PHẢI KHỚP VỚI ĐƠN GIÁ ĐÃ LÀM TRÒN ───────────────────
+     *
+     * Viettel đối chiếu ngay trên payload:
+     *
+     *     unitPrice × quantity == itemTotalAmountWithoutTax
+     *
+     * Lệch một đồng là trả về 400:
+     *   IVI_TOTAL_A_WITHOUT_TAX_AND_UP_QUAN_NOT_COMPARED
+     *   "Đơn giá nhân Số lượng không so khớp với Thành tiền"
+     *
+     * Từ 24/08/2026 đơn giá bắt buộc là SỐ NGUYÊN (unit_price_decimals() = 0),
+     * mà tiền hàng chia cho số lượng thì gần như luôn lẻ — đơn 19011AA00527:
+     * 111.111 ÷ 24 = 4.629,625 → khai 4.630 thì 4.630 × 24 = 111.120, lệch 9đ
+     * với tiền hàng thật. KHÔNG có cách nào vừa giữ đơn giá nguyên vừa giữ
+     * nguyên tiền hàng lẻ; bắt buộc phải chọn số nào được xê dịch.
+     *
+     * Chốt: NEO VÀO SỐ KHÁCH ĐÃ TRẢ (itemTotalAmountWithTax) — đúng mục 2 của
+     * mô hình tiền: "hoá đơn phải neo vào Thành tiền, con số khách trả". Phần
+     * lệch do làm tròn đơn giá dồn hết vào TIỀN THUẾ:
+     *
+     *     unitPrice  = làm tròn theo số thập phân Viettel cho phép
+     *     withoutTax = unitPrice × quantity     ← điều kiện của Viettel
+     *     withTax    = giữ nguyên số đã thu     ← điều kiện của bill
+     *     taxAmount  = withTax − withoutTax
+     *
+     * Nhờ vậy thành tiền TỪNG DÒNG trên hoá đơn vẫn bằng đúng thành tiền từng
+     * dòng của phiếu bán, và tổng hoá đơn không xê dịch một đồng nào. Cái phải
+     * trả giá là tiền thuế khai lệch với "tiền hàng × thuế suất" tối đa nửa
+     * đồng nhân số lượng (dòng 24 chai: 8.880 so với 8.889,6) — sai số làm
+     * tròn, đi cả hai chiều, không phải khai sai bản chất.
+     *
+     * ⚠️ Dòng thuế 0% / KCT không có chỗ để dồn (tiền thuế phải bằng 0), nên
+     * withTax buộc phải bám theo withoutTax, và đơn giá LÀM TRÒN LÊN để hoá
+     * đơn không bao giờ khai thiếu hơn số đã thu. Đây là trường hợp DUY NHẤT
+     * hoá đơn lệch với bill — dưới một đồng nhân số lượng, và chỉ khi tiền
+     * hàng không chia hết cho số lượng.
+     *
+     * Để MỘT CHỖ DUY NHẤT vì hoá đơn điều chỉnh (trả hàng) phải dựng số y hệt
+     * hoá đơn gốc — hai bên lệch nhau là cơ quan thuế đối chiếu ra ngay.
+     *
+     * @param float $quantity    Số lượng theo ĐVT khai trên hoá đơn
+     * @param float $unit_price  Đơn giá sau CK trước thuế, CHƯA làm tròn
+     * @param int   $with_tax    Tiền dòng gồm thuế — số khách thật sự trả
+     * @param float $tax_percent Thuế suất của chính dòng đó (KCT đã quy về 0)
+     */
+    /**
+     * ─── SỐ LƯỢNG LẺ: NẮN ĐƠN GIÁ ĐỂ TÍCH TRÒN ĐỒNG ─────────────────────────
+     *
+     * Hoá đơn điều chỉnh hay có số lượng lẻ: bán "1 Vỉ_4" mà khách trả 1 hộp
+     * thì số lượng hoàn quy về ĐVT của hoá đơn gốc là 0,25 vỉ. Đơn giá 92.593
+     * × 0,25 = 23.148,25 — không tròn đồng, mà itemTotalAmountWithoutTax thì
+     * bắt buộc là số nguyên ⇒ Viettel lại trả
+     * IVI_TOTAL_A_WITHOUT_TAX_AND_UP_QUAN_NOT_COMPARED.
+     *
+     * Cách duy nhất còn lại là nhích ĐƠN GIÁ tới giá trị gần nhất mà tích ra
+     * số nguyên: 0,25 = 1/4 nên đơn giá phải chia hết cho 4 → 92.592, lệch
+     * đúng 1đ so với đơn giá đã khai ở hoá đơn gốc, còn tiền hàng thì tròn
+     * đồng và khớp tuyệt đối với ràng buộc của Viettel.
+     *
+     * Số lượng nguyên (gần như toàn bộ dòng bán) không bao giờ đi vào vòng dò
+     * này: tích đã tròn đồng sẵn thì trả về ngay.
+     *
+     * Dò tối đa NAN_DON_GIA_TOI_DA bước để không treo khi số lượng là số thập
+     * phân không quy được về phân số đơn giản (0,333…); không tìm được thì trả
+     * lại đơn giá cũ — thà để Viettel báo lỗi còn hơn tự bịa một con số xa.
+     */
+    const NAN_DON_GIA_TOI_DA = 200;
+
+    private static function nan_don_gia_cho_tron_dong($api_price, $quantity, $uu_tien_len = false)
+    {
+        $quantity = (float) $quantity;
+        if ($quantity <= 0) {
+            return $api_price;
+        }
+
+        $tich = $api_price * $quantity;
+        if (abs($tich - round($tich)) < 1e-6) {
+            return $api_price;
+        }
+
+        $decimals = self::unit_price_decimals();
+        $factor   = pow(10, $decimals);
+        $n0       = (int) round($api_price * $factor);
+
+        for ($i = 1; $i <= self::NAN_DON_GIA_TOI_DA; $i++) {
+            // Ưu tiên nhích LÊN, để hoá đơn không khai thiếu hơn số đã thu.
+            $ung_vien = $uu_tien_len ? [$n0 + $i] : [$n0 + $i, $n0 - $i];
+            foreach ($ung_vien as $n) {
+                if ($n < 0) {
+                    continue;
+                }
+                $thu = $n * $quantity / $factor;
+                if (abs($thu - round($thu)) < 1e-6) {
+                    return $decimals === 0
+                        ? (int) round($n / $factor)
+                        : (float) sprintf('%.' . $decimals . 'F', $n / $factor);
+                }
+            }
+        }
+
+        return $api_price;
+    }
+
+    public static function api_line_amounts($quantity, $unit_price, $with_tax, $tax_percent)
+    {
+        $quantity = max(0.0, (float) $quantity);
+        $with_tax = max(0, (int) round($with_tax));
+
+        /*
+         * Thuế 0% / KCT: tiền thuế phải bằng 0 nên không có chỗ dồn phần lẻ —
+         * đây là trường hợp duy nhất tiền dòng trên hoá đơn buộc phải xê dịch
+         * so với bill. Chốt LÀM TRÒN LÊN để hoá đơn không bao giờ khai thiếu
+         * hơn số đã thu: 100.000 chia 3 → đơn giá 33.334, dòng ra 100.002.
+         */
+        if ((float) $tax_percent <= 0) {
+            $api_price   = self::nan_don_gia_cho_tron_dong(self::api_unit_price($unit_price, true), $quantity, true);
+            $without_tax = max(0, (int) round($api_price * $quantity));
+
+            return [
+                'unit_price'  => $api_price,
+                'without_tax' => $without_tax,
+                'with_tax'    => $without_tax,
+                'tax_amount'  => 0,
+            ];
+        }
+
+        $api_price   = self::nan_don_gia_cho_tron_dong(self::api_unit_price($unit_price), $quantity);
+        $without_tax = max(0, (int) round($api_price * $quantity));
+
+        // Chặn tiền thuế âm nếu đơn giá làm tròn lên vượt cả số đã thu.
+        $with_tax = max($with_tax, $without_tax);
+
+        return [
+            'unit_price'  => $api_price,
+            'without_tax' => $without_tax,
+            'with_tax'    => $with_tax,
+            'tax_amount'  => $with_tax - $without_tax,
+        ];
     }
 
     /** Các trường người mua được phép lưu kèm đơn để phát hành hoá đơn */
@@ -1027,29 +1178,13 @@ class TGS_Viettel_Invoice_Flow_Service
             $line        = $money::line($quantity, $unit_price, 0, $tax_percent);
 
             /*
-             * ─── BA SỐ CỦA DÒNG, NEO VÀO TIỀN KHÁCH THẬT SỰ TRẢ ─────────────
+             * ─── HAI SỐ CỦA SỔ SÁCH, NEO VÀO TIỀN KHÁCH THẬT SỰ TRẢ ─────────
              *
-             * `itemTotalAmountWithTax` phải bằng ĐÚNG số đã thu của dòng đó,
-             * nên nó được làm tròn TRỰC TIẾP từ `thanh_tien`, rồi tiền thuế mới
-             * suy ra bằng hiệu. Nhờ vậy:
+             * `$tien_khach_tra` phải bằng ĐÚNG số đã thu của dòng đó, nên nó
+             * neo vào TIỀN THUẾ ĐÃ LƯU lúc bán, y như cách POS chốt tiền:
              *
-             *   • without + tax = with_tax  → thoả ràng buộc Viettel đối chiếu
-             *   • Σ with_tax    = đúng số tiền phiếu bán đã thu của khách
-             *
-             * Bản cũ làm tròn riêng `tien_hang_sau_ck` và `thue` rồi cộng lại:
-             * hai phần lẻ cùng ≥ 0,5 là hoá đơn khai dôi 1đ so với số đã thu, mà
-             * hoá đơn phát hành rồi thì không sửa được. Đây cũng đúng quy tắc
-             * "làm tròn từng dòng rồi mới cộng" ở mục 2 của tài liệu mô hình
-             * tiền, và trùng cách POS chốt `local_ledger_item_tax_amount`
-             * (thuế = tiền đã thu − tiền hàng trước thuế).
-             */
-            $without_tax = max(0, (int) round($line['tien_hang_sau_ck']));
-
-            /*
-             * ─── TIỀN DÒNG PHẢI BẰNG ĐÚNG TIỀN LÚC BÁN ──────────────────────
-             *
-             * POS chốt tiền của dòng theo đúng công thức này:
              *     thành tiền = làm_tròn(tiền hàng sau CK + TIỀN THUẾ ĐÃ LƯU)
+             *
              * (xem TGS_POS_Order_Handler — cột local_ledger_item_tax_amount).
              *
              * Bản cũ ở đây lại TÍNH LẠI tiền thuế từ thuế suất:
@@ -1059,17 +1194,15 @@ class TGS_Viettel_Invoice_Flow_Service
              * hàng 450.000 giảm còn 430.000 → CK trước thuế 18.518,52 lưu thành
              * 18.519 → tính lại ra 429.999, trong khi khách trả 430.000. Kế toán
              * đối chiếu bill với hoá đơn là lệch ngay, mà hoá đơn phát hành rồi
-             * thì không sửa được.
-             *
-             * Nên NEO VÀO TIỀN THUẾ ĐÃ LƯU, đúng như lúc bán. Dòng nào chưa có
-             * (đơn cũ) thì mới rơi về cách tính lại.
+             * thì không sửa được. Dòng nào chưa lưu tiền thuế (đơn cũ) mới rơi
+             * về cách tính lại.
              */
-            $stored_tax_raw = (float) ($item['stored_tax_amount'] ?? 0);
-            $with_tax = $stored_tax_raw > 0
+            $stored_tax_raw  = (float) ($item['stored_tax_amount'] ?? 0);
+            $so_sach_without = max(0, (int) round($line['tien_hang_sau_ck']));
+            $tien_khach_tra  = $stored_tax_raw > 0
                 ? max(0, (int) round($line['tien_hang_sau_ck'] + $stored_tax_raw))
                 : max(0, (int) round($line['thanh_tien']));
-
-            $tax_amount  = max(0, $with_tax - $without_tax);
+            $so_sach_tax     = max(0, $tien_khach_tra - $so_sach_without);
 
             /*
              * ─── ĐỐI CHIẾU VỚI SỐ ĐÃ CHỐT LÚC BÁN ───────────────────────────
@@ -1081,22 +1214,40 @@ class TGS_Viettel_Invoice_Flow_Service
              * tròn. Hoá đơn phát hành rồi không sửa được nên dừng ở đây, giống
              * cách luồng này đã chặn dòng thiếu thuế suất.
              *
+             * ⚠️ Đối chiếu chạy trên SỐ SỔ SÁCH, TRƯỚC bước nắn theo đơn giá
+             * gửi đi ở dưới. Bước đó cố tình dịch tiền thuế đi tới nửa đồng
+             * nhân số lượng, đem so ở đó thì mọi dòng số lượng lớn đều báo
+             * lệch oan và quầy không xuất được hoá đơn.
+             *
              * Bỏ qua khi dòng chưa có tiền thuế (đơn cũ, chờ bước vá dữ liệu
              * bù vào) — chặn cả những dòng đó thì quầy không xuất được hoá đơn.
              */
-            $stored_tax = (float) ($item['stored_tax_amount'] ?? 0);
-            if ($stored_tax > 0 && abs($stored_tax - $tax_amount) > 1.0) {
+            if ($stored_tax_raw > 0 && abs($stored_tax_raw - $so_sach_tax) > 1.0) {
                 return [
                     'success' => false,
                     'message' => sprintf(
                         'Dòng "%s" có tiền thuế lệch với số đã chốt lúc bán (%sđ so với %sđ). '
                             . 'Kiểm tra lại đơn giá/thuế của dòng này trước khi phát hành hóa đơn.',
                         (string) ($item['sku'] ?? ''),
-                        number_format($tax_amount, 0, ',', '.'),
-                        number_format($stored_tax, 0, ',', '.')
+                        number_format($so_sach_tax, 0, ',', '.'),
+                        number_format($stored_tax_raw, 0, ',', '.')
                     ),
                 ];
             }
+
+            /*
+             * ─── NẮN BA SỐ THEO ĐƠN GIÁ THẬT SỰ GỬI ĐI ──────────────────────
+             *
+             * Viettel bắt unitPrice × quantity == itemTotalAmountWithoutTax,
+             * mà đơn giá gửi đi đã bị làm tròn về số nguyên. api_line_amounts()
+             * giữ luật đó cho CẢ hoá đơn gốc lẫn hoá đơn điều chỉnh — đọc phần
+             * chú thích ở đó trước khi đổi bất cứ con số nào dưới đây.
+             */
+            $api_line    = self::api_line_amounts($quantity, $unit_price, $tien_khach_tra, $tax_percent);
+            $api_price   = $api_line['unit_price'];
+            $without_tax = $api_line['without_tax'];
+            $with_tax    = $api_line['with_tax'];
+            $tax_amount  = $api_line['tax_amount'];
 
             $sum_without_tax += $without_tax;
             $sum_tax         += $tax_amount;
@@ -1131,8 +1282,12 @@ class TGS_Viettel_Invoice_Flow_Service
                  * 32.407,41666… Viettel chỉ nhận đơn giá đúng số chữ số thập
                  * phân họ cấu hình, lẻ hơn là trả INVALID_DECIMAL_POINT_PRICE.
                  * Xem unit_price_decimals().
+                 *
+                 * Lấy lại từ api_line_amounts() chứ KHÔNG gọi api_unit_price()
+                 * lần nữa: ba con số tiền ở dưới đã dựng từ đúng đơn giá này,
+                 * gọi lại là mở đường cho hai chỗ lệch nhau sau này.
                  */
-                'unitPrice' => self::api_unit_price($unit_price),
+                'unitPrice' => $api_price,
                 'itemTotalAmountWithoutTax' => $without_tax,
                 'itemTotalAmountAfterDiscount' => $without_tax,
                 'itemTotalAmountWithTax' => $with_tax,

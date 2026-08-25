@@ -478,7 +478,6 @@ class TGS_Viettel_Invoice_Return_Adjustment
             }
 
             $money_line = $money::line($quantity, $unit_price, 0, $tax_percent);
-            $before   = max(0, (int) round($money_line['tien_hang_sau_ck']));
 
             /*
              * ─── TIỀN ĐIỀU CHỈNH PHẢI KHỚP DÒNG TRÊN HOÁ ĐƠN GỐC ────────────
@@ -504,7 +503,27 @@ class TGS_Viettel_Invoice_Return_Adjustment
                 $with_tax = max(0, (int) round($money_line['thanh_tien']));
             }
 
-            $tax      = max(0, $with_tax - $before);
+            /*
+             * ─── NẮN BA SỐ THEO ĐƠN GIÁ THẬT SỰ GỬI ĐI ──────────────────────
+             *
+             * Viettel bắt unitPrice × quantity == itemTotalAmountWithoutTax mà
+             * đơn giá gửi đi đã bị làm tròn về số nguyên, nên tiền hàng của
+             * dòng phải dựng LẠI TỪ đơn giá đó. Dùng chung api_line_amounts()
+             * với hoá đơn gốc: hoàn hết một dòng thì tỉ lệ = 1, số lượng bằng
+             * nhau, đơn giá bằng nhau ⇒ ba con số ra đúng bằng dòng trên hoá
+             * đơn gốc — thứ mà cơ quan thuế đem ra đối chiếu.
+             */
+            $api_line = TGS_Viettel_Invoice_Flow_Service::api_line_amounts(
+                $quantity,
+                $unit_price,
+                $with_tax,
+                $tax_percent
+            );
+            $api_price = $api_line['unit_price'];
+            $before    = $api_line['without_tax'];
+            $with_tax  = $api_line['with_tax'];
+            $tax       = $api_line['tax_amount'];
+
             $items[] = [
                 'lineNumber' => $line++,
                 'selection' => 1,
@@ -515,7 +534,9 @@ class TGS_Viettel_Invoice_Return_Adjustment
                 // Số chữ số thập phân do Viettel cấu hình, xem
                 // TGS_Viettel_Invoice_Flow_Service::unit_price_decimals(): lẻ
                 // hơn là trả INVALID_DECIMAL_POINT_PRICE, không phát hành được.
-                'unitPrice' => TGS_Viettel_Invoice_Flow_Service::api_unit_price($unit_price),
+                // Lấy lại từ api_line_amounts() để đơn giá và tiền hàng của
+                // dòng chắc chắn là một cặp, không phải hai lần làm tròn.
+                'unitPrice' => $api_price,
                 'itemTotalAmountWithoutTax' => $before,
                 'itemTotalAmountAfterDiscount' => $before,
                 'itemTotalAmountWithTax' => $with_tax,

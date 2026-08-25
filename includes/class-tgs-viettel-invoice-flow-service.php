@@ -76,23 +76,30 @@ class TGS_Viettel_Invoice_Flow_Service
     }
 
     /**
-     * Khách này có phải khách lẻ không.
+     * Tên này có phải NHÃN NỘI BỘ của phần mềm không (không xét mã số thuế).
      *
-     * Có mã số thuế ⇒ không phải khách lẻ, dù tên là gì.
-     * Còn lại: tên rỗng hoặc trùng một trong các nhãn mặc định thì là khách lẻ.
+     * "Khách lẻ" là cách phần mềm gọi khi chưa lấy thông tin khách — KHÔNG phải
+     * tên một con người, nên tuyệt đối không được đi lên hoá đơn.
      *
-     * @param array $customer
+     * TÁCH RIÊNG KHỎI is_retail_buyer() VÌ HAI CÂU HỎI KHÁC NHAU:
+     *
+     *   is_retail_buyer()           — "giao dịch này có phải bán lẻ không"
+     *                                 Có MST ⇒ KHÔNG, vì đã bán cho đơn vị.
+     *   is_placeholder_buyer_name() — "ô tên đang để nhãn nội bộ à"
+     *                                 Không liên quan MST.
+     *
+     * Gộp hai câu này làm một chính là lỗi đã gặp: khách đưa mã số thuế công ty
+     * nhưng chưa khai tên người mua, hoá đơn gửi lên cơ quan thuế ghi nguyên
+     * "Khách lẻ" ở dòng Họ tên người mua hàng.
+     *
+     * ⚠️ Phải khớp với JS: tgsIsPlaceholderBuyerName() trong tgs-retail-buyer.js
+     *
+     * @param string $name
      * @return bool
      */
-    public static function is_retail_buyer($customer)
+    public static function is_placeholder_buyer_name($name)
     {
-        $customer = (array) $customer;
-
-        if (trim((string) ($customer['customer_tax_code'] ?? '')) !== '') {
-            return false;
-        }
-
-        $name = trim((string) ($customer['customer_name'] ?? ''));
+        $name = trim((string) $name);
         if ($name === '') {
             return true;
         }
@@ -109,6 +116,28 @@ class TGS_Viettel_Invoice_Flow_Service
         ];
 
         return in_array($folded, $placeholders, true);
+    }
+
+    /**
+     * Giao dịch này có phải BÁN LẺ không.
+     *
+     * Có mã số thuế ⇒ không phải bán lẻ, dù tên là gì — dùng để quyết định dòng
+     * TÊN ĐƠN VỊ trên hoá đơn (có MST thì phải ghi tên công ty thật).
+     *
+     * Còn dòng HỌ TÊN NGƯỜI MUA thì xét bằng is_placeholder_buyer_name().
+     *
+     * @param array $customer
+     * @return bool
+     */
+    public static function is_retail_buyer($customer)
+    {
+        $customer = (array) $customer;
+
+        if (trim((string) ($customer['customer_tax_code'] ?? '')) !== '') {
+            return false;
+        }
+
+        return self::is_placeholder_buyer_name($customer['customer_name'] ?? '');
     }
 
     /** Mã thuế suất dùng cho dòng không chịu thuế. */
@@ -1318,6 +1347,16 @@ class TGS_Viettel_Invoice_Flow_Service
         $is_retail_buyer    = self::is_retail_buyer($customer);
         $retail_buyer_label = self::retail_buyer_label();
 
+        /*
+         * HỌ TÊN NGƯỜI MUA xét theo NHÃN, không theo mã số thuế.
+         *
+         * Khách đưa mã số thuế công ty nhưng nhân viên chưa khai tên người mua
+         * thì ô tên vẫn đang là "Khách lẻ" — đó là nhãn nội bộ của phần mềm,
+         * không phải tên người, và nó đã từng đi thẳng lên hoá đơn gửi cơ quan
+         * thuế. Xem is_placeholder_buyer_name().
+         */
+        $buyer_name_is_placeholder = self::is_placeholder_buyer_name($customer['customer_name'] ?? '');
+
         $payload = [
             'local_ledger_code' => (string) ($filtered_payload['sale_code'] ?? ''),
             'generalInvoiceInfo' => [
@@ -1337,7 +1376,7 @@ class TGS_Viettel_Invoice_Flow_Service
                  * Khách lẻ ⇒ cả hai dòng đều ghi "Bán cho người tiêu dùng",
                  * không ghi "Khách lẻ" — xem is_retail_buyer().
                  */
-                'buyerName' => $is_retail_buyer
+                'buyerName' => $buyer_name_is_placeholder
                     ? $retail_buyer_label
                     : (string) ($customer['customer_name'] ?? ''),
                 'buyerLegalName' => $is_retail_buyer

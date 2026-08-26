@@ -2062,9 +2062,23 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        $to_email = sanitize_email($_POST['to_email'] ?? 'thuy.nguyenvan2000hn@gmail.com');
+        /*
+         * ─── KHÔNG CÓ EMAIL THÌ DỪNG, TUYỆT ĐỐI KHÔNG ĐOÁN ──────────────────
+         *
+         * Bản trước rơi về một địa chỉ Gmail cá nhân gán cứng khi thiếu hoặc
+         * sai email. Nghĩa là mỗi lần nhân viên gõ nhầm một ký tự, PDF hoá đơn
+         * của khách — có đủ tên, mã số thuế, mặt hàng, số tiền — bay vào hộp
+         * thư của một người ngoài. Mà giao diện vẫn báo "gửi thành công", nên
+         * không ai biết.
+         *
+         * Thà báo lỗi để nhân viên gõ lại còn hơn gửi nhầm người.
+         */
+        $to_email = sanitize_email($_POST['to_email'] ?? '');
         if ($to_email === '') {
-            $to_email = 'thuy.nguyenvan2000hn@gmail.com';
+            wp_send_json_error([
+                'message' => 'Chưa có email người nhận hợp lệ — kiểm tra lại ô Email của khách.',
+            ], 400);
+            return;
         }
 
         global $wpdb;

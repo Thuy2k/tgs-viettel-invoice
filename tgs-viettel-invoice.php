@@ -1366,6 +1366,14 @@ class TGS_Viettel_Invoice_Plugin
         $item_ids = is_string($sale['local_ledger_item_id']) ? json_decode($sale['local_ledger_item_id'], true) : [];
         $item_ids = is_array($item_ids) ? array_map('intval', array_filter($item_ids)) : [];
 
+        /*
+         * BILL CHÍNH RỖNG LÀ CHUYỆN BÌNH THƯỜNG, KHÔNG PHẢI ĐƠN HỎNG.
+         *
+         * Đơn toàn hàng mã Z, hoặc nhân viên đã chuyển hết dòng xuống bill Z ở
+         * chính màn này, thì bill chính không còn dòng nào. Vẫn phải trả về bill
+         * Z kèm cờ `nothing_to_send` để màn review vẽ đủ hai bill và nói rõ
+         * "không có gì phải gửi thuế" — xem tgs_pos/docs/bill-z-va-hang-tang.md.
+         */
         if (empty($item_ids)) {
             wp_send_json_success([
                 'gift_items' => [],
@@ -1373,6 +1381,9 @@ class TGS_Viettel_Invoice_Plugin
                 'all_items'  => [],
                 'has_under24_main' => false,
                 'under24_main_skus' => [],
+                'promo_split'    => $this->load_promo_split_ticket($sale_ledger_id),
+                'nothing_to_send' => true,
+                'is_promo_split_sale' => true,
                 'sale_code'     => (string) ($sale['local_ledger_code'] ?? ''),
                 'sale_date'     => (string) ($sale['created_at'] ?? ''),
                 'customer'      => ['name' => 'Khách lẻ', 'phone' => '', 'address' => '', 'tax_code' => '', 'company_name' => '', 'email' => ''],
@@ -1624,6 +1635,8 @@ class TGS_Viettel_Invoice_Plugin
              */
             'is_promo_split_sale'      => !empty($all_items)
                 && ($stat_z_sku_count + $stat_z_main_count) === count($all_items),
+            // Bill chính không còn dòng nào để khai — đơn xử lý nội bộ hoàn toàn
+            'nothing_to_send'          => empty($all_items),
             'stat_z_sku_count'         => $stat_z_sku_count,
             'stat_z_main_count'        => $stat_z_main_count,
             'stat_danger_flagged_count' => $stat_danger_flagged_count,
@@ -1716,6 +1729,17 @@ class TGS_Viettel_Invoice_Plugin
                     'quantity'  => (float) $unit_view['quantity'],
                     'price'     => floatval($row['price']) * max(1.0, (float) $unit_view['ratio']),
                     'is_gift'   => intval($row['local_ledger_item_gift_type'] ?? 0) === 1,
+                    /*
+                     * Dòng này do HỆ THỐNG tự tách hay do NHÂN VIÊN chuyển tay?
+                     *
+                     * Xét bằng chính SKU, không phải bằng chuyện nó đang nằm ở
+                     * bill Z: bill Z chứa cả hai loại. Chỉ mã đuôi Z mới bị khoá
+                     * không cho đưa lại bill chính (xem
+                     * TGS_POS_Promo_Split_Service::item_is_auto_split).
+                     */
+                    'is_sku_ends_z' => TGS_Viettel_Invoice_Flow_Service::is_promo_split_sku(
+                        (string) ($row['local_product_sku'] ?? '')
+                    ),
                 ];
             }
         }
@@ -3448,6 +3472,21 @@ class TGS_Viettel_Invoice_Plugin
                 return;
             }
 
+            /*
+             * Bill chính không còn dòng nào (đơn toàn hàng mã Z, hoặc nhân viên
+             * đã chuyển hết xuống bill Z) thì KHÔNG phát hành hoá đơn và cũng
+             * KHÔNG báo lỗi: cả đơn xử lý nội bộ. Trả success kèm cờ để POS in
+             * bill rồi đi tiếp.
+             */
+            if (!$this->sale_has_taxable_lines($sale_ledger_id)) {
+                wp_send_json_success([
+                    'nothing_to_send' => true,
+                    'step' => 'nothing_to_send',
+                    'message' => 'Đơn này không có dòng nào phải gửi thuế — toàn bộ nằm ở bill Z, xử lý nội bộ.',
+                ]);
+                return;
+            }
+
             // Bước 1: Build source payload từ đơn bán hàng
             $source_result = $this->flow_service->build_smart_payload_from_sale($sale_ledger_id);
             if (empty($source_result['success'])) {
@@ -3686,6 +3725,33 @@ class TGS_Viettel_Invoice_Plugin
         $this->run_auto_issue_cqt_flow($sale_data, $settings);
     }
 
+    /**
+     * Bill chính còn dòng nào để khai thuế không.
+     *
+     * Đọc thẳng danh sách dòng của phiếu bán: hàng chuyển xuống bill Z đã bị gỡ
+     * khỏi danh sách này rồi (xem TGS_POS_Promo_Split_Service), nên rỗng nghĩa
+     * là cả đơn xử lý nội bộ.
+     */
+    private function sale_has_taxable_lines($sale_ledger_id)
+    {
+        global $wpdb;
+
+        $sale_ledger_id = intval($sale_ledger_id);
+        if ($sale_ledger_id <= 0 || !defined('TGS_TABLE_LOCAL_LEDGER')) {
+            return true;   // không đọc được thì cứ đi đường cũ, đừng chặn oan
+        }
+
+        $raw = $wpdb->get_var($wpdb->prepare(
+            'SELECT local_ledger_item_id FROM ' . TGS_TABLE_LOCAL_LEDGER . ' WHERE local_ledger_id = %d LIMIT 1',
+            $sale_ledger_id
+        ));
+
+        $item_ids = is_string($raw) ? json_decode($raw, true) : $raw;
+        $item_ids = is_array($item_ids) ? array_filter(array_map('intval', $item_ids)) : [];
+
+        return !empty($item_ids);
+    }
+
     private function parse_excluded_item_ids_from_post()
     {
         $raw = sanitize_text_field($_POST['excluded_item_ids'] ?? '');
@@ -3745,6 +3811,16 @@ class TGS_Viettel_Invoice_Plugin
         $sale_ledger_id = intval($sale_data['sale_ledger_id'] ?? 0);
         if ($sale_ledger_id <= 0) {
             return ['success' => false, 'step' => 'validate', 'message' => 'Thiếu mã đơn bán để gửi hóa đơn.'];
+        }
+
+        // Bill chính rỗng = đơn xử lý nội bộ, không phát hành và không phải lỗi.
+        if (!$this->sale_has_taxable_lines($sale_ledger_id)) {
+            return [
+                'success' => true,
+                'step' => 'nothing_to_send',
+                'nothing_to_send' => true,
+                'message' => 'Đơn không có dòng nào phải gửi thuế — toàn bộ ở bill Z, xử lý nội bộ.',
+            ];
         }
 
         if ($enforce_idempotency) {

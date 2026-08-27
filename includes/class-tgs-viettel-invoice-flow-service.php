@@ -54,6 +54,141 @@ class TGS_Viettel_Invoice_Flow_Service
     const KCT_TAX_CODE = -2;
 
     /*
+     * ─── MÃ CHỨNG TỪ: MÃ PHIẾU BÁN PHẢI ĐI LÊN VIETTEL ──────────────────────
+     *
+     * Kế toán cần đối chiếu hoá đơn Viettel với phiếu bán bên mình, nên mã
+     * phiếu (CNTESTAA10008…) phải nằm trong file *Báo cáo bán hàng chi tiết*
+     * tải từ trang Viettel. Phần mềm cũ (MST 0106933743-020) để ở cột
+     * "Mã chứng từ"; bên mình HIỆN CHƯA CÓ cột đó, lý do ở dưới.
+     *
+     * ─── ĐÃ ĐO ĐƯỢC GÌ (MST test 0100109106-507) ───────────────────────────
+     *
+     * [1] Khối `metadata` đi vào phần *Thông tin khác* (TTKhac) của hoá đơn.
+     *     Đọc lại bằng getInvoiceRepresentationFile fileType 'ZIP' (fileType
+     *     'XML' bị FILE_TYPE_INVALID) rồi mở file .xml trong gói.
+     *
+     * [2] keyTag 'invoiceNote' là tag riêng của Viettel: khai keyLabel gì cũng
+     *     bị ép nhãn "Ghi chú" (hoá đơn C26TNH17644).
+     *
+     * [3] Tag lạ KHÔNG bị từ chối và KHÔNG in ra file PDF: bắn 12 tag
+     *     (C26TNH18240) rồi 20 tag (C26TNH18246) đều HTTP 200, XML lưu đủ.
+     *
+     * [4] NHƯNG báo cáo Excel chỉ hiện những trường mà MẪU HOÁ ĐƠN CÓ KHAI.
+     *     Bản xuất "tất cả ký hiệu" (129 cột) cho thấy mỗi cột thông tin khác
+     *     chỉ có dữ liệu ở đúng một ký hiệu: "Ghi chú" ↔ C26TNH, "Biển số xe/
+     *     Trọng tải/Giờ vào" ↔ C26MAA, "Lớp" ↔ K26TOQ, "Lệnh điều động nội
+     *     bộ" ↔ K26NXA. Xuất lại sau khi có hai hoá đơn dò: KHÔNG dòng nào
+     *     hiện 20 tag kia — cả file không có nổi một ký tự '#'.
+     *
+     * ⇒ Mẫu C26TNH chỉ khai mỗi "Ghi chú", nên ĐÓ LÀ Ô DUY NHẤT dùng được.
+     *   Vì vậy Ghi chú mang ĐÚNG mã phiếu, không ghép thêm chữ, để kế toán
+     *   VLOOKUP thẳng sang báo cáo bán hàng bên mình. Câu "Tự động phát hành
+     *   từ POS" chỉ còn là dự phòng cho phiếu không đọc được mã.
+     *
+     * ─── KHI LÊN MST THẬT THÌ LÀM GÌ ───────────────────────────────────────
+     *
+     * Lúc Viettel dựng mẫu hoá đơn cho MST của công ty, YÊU CẦU KHAI THÊM
+     * trường "Mã chứng từ" và xin luôn mã trường. Khi đó chỉ cần:
+     *
+     *     add_filter('tgs_viettel_invoice_document_code_key_tags', fn() => ['<mã trường Viettel cấp>']);
+     *
+     * và trả Ghi chú về câu cũ nếu muốn. Ba tag để sẵn dưới đây là phòng khi
+     * mẫu mới khai sẵn một trong số đó — gửi thừa vô hại (đã đo ở [3]).
+     */
+    const DOCUMENT_CODE_LABEL = 'Mã chứng từ';
+    const DOCUMENT_CODE_NOTE_FALLBACK = 'Tự động phát hành từ POS';
+    const DOCUMENT_CODE_KEY_TAGS = ['maChungTu', 'documentCode', 'docNo'];
+
+    /*
+     * Có nhét mã phiếu vào ô "Ghi chú" nữa không.
+     *
+     * BẬT trong lúc còn chạy mẫu test: mẫu test chỉ khai mỗi trường "Ghi chú",
+     * nên đó là ô DUY NHẤT báo cáo chịu hiện — không nhét vào đấy thì kế toán
+     * không thấy mã phiếu ở đâu cả.
+     *
+     * TẮT khi cắm sang mẫu thật (mẫu có khai riêng trường "Mã chứng từ"): lúc
+     * đó mã phiếu đã có cột riêng, để nguyên bật thì mã hiện ở CẢ HAI cột và
+     * ô Ghi chú mất câu đánh dấu nguồn POS.
+     *
+     *     add_filter('tgs_viettel_invoice_document_code_in_note', '__return_false');
+     */
+    const DOCUMENT_CODE_IN_NOTE = true;
+
+    /** Danh sách keyTag ứng viên cho trường "Mã chứng từ". Rỗng = không gửi. */
+    public static function document_code_key_tags()
+    {
+        $tags = apply_filters('tgs_viettel_invoice_document_code_key_tags', self::DOCUMENT_CODE_KEY_TAGS);
+        if (is_string($tags)) {
+            $tags = [$tags];
+        }
+        if (!is_array($tags)) {
+            return [];
+        }
+
+        $clean = [];
+        foreach ($tags as $tag) {
+            $tag = is_string($tag) ? trim($tag) : '';
+            if ($tag !== '' && !in_array($tag, $clean, true)) {
+                $clean[] = $tag;
+            }
+        }
+        return $clean;
+    }
+
+    /**
+     * Dựng khối metadata cho hoá đơn — dùng cho CẢ hoá đơn bán lẫn hoá đơn
+     * điều chỉnh do trả hàng, đừng dựng tay ở nơi khác.
+     *
+     * @param string      $document_code Mã chứng từ: mã phiếu bán, hoặc mã
+     *                                   phiếu hoàn nếu là hoá đơn điều chỉnh.
+     * @param string|null $note          Câu ghi chú DỰ PHÒNG, chỉ dùng khi
+     *                                   không nhét mã phiếu vào ô Ghi chú
+     *                                   (DOCUMENT_CODE_IN_NOTE tắt) hoặc khi
+     *                                   phiếu không đọc được mã. Phiếu hoàn
+     *                                   truyền câu "Phiếu hoàn X: lý do" vào
+     *                                   đây để tắt công tắc là ghi chú trở về
+     *                                   y như cũ.
+     */
+    public static function build_invoice_metadata($document_code, $note = null)
+    {
+        $document_code = trim((string) $document_code);
+        $fallback_note = $note === null ? '' : trim((string) $note);
+        if ($fallback_note === '') {
+            $fallback_note = self::DOCUMENT_CODE_NOTE_FALLBACK;
+        }
+
+        $in_note = (bool) apply_filters(
+            'tgs_viettel_invoice_document_code_in_note',
+            self::DOCUMENT_CODE_IN_NOTE
+        );
+        $note = ($in_note && $document_code !== '') ? $document_code : $fallback_note;
+
+        $metadata = [
+            [
+                'keyTag' => 'invoiceNote',
+                'stringValue' => $note,
+                'valueType' => 'text',
+                'keyLabel' => 'Ghi chú',
+            ],
+        ];
+
+        if ($document_code === '') {
+            return $metadata;
+        }
+
+        foreach (self::document_code_key_tags() as $key_tag) {
+            $metadata[] = [
+                'keyTag' => $key_tag,
+                'stringValue' => $document_code,
+                'valueType' => 'text',
+                'keyLabel' => self::DOCUMENT_CODE_LABEL,
+            ];
+        }
+
+        return $metadata;
+    }
+
+    /*
      * ─── KHÁCH LẺ: TÊN NGƯỜI MUA TRÊN HOÁ ĐƠN ────────────────────────────────
      *
      * Bán lẻ không lấy thông tin khách thì hoá đơn phải ghi
@@ -1357,6 +1492,15 @@ class TGS_Viettel_Invoice_Flow_Service
          */
         $buyer_name_is_placeholder = self::is_placeholder_buyer_name($customer['customer_name'] ?? '');
 
+        /*
+         * Mã chứng từ = mã phiếu bán bên mình (`local_ledger_code` của bảng
+         * wp_local_ledger, chính con số quầy đọc trên bill, ví dụ
+         * CNTESTAA10008). Đơn tách bill khuyến mãi thì mỗi phiếu con mang mã
+         * riêng của nó, đúng nguyên tắc "hoá đơn nào mã chứng từ nấy".
+         * Xem build_invoice_metadata() để biết vì sao phải gửi kèm keyTag.
+         */
+        $document_code = trim((string) ($filtered_payload['sale_code'] ?? ''));
+
         $payload = [
             'local_ledger_code' => (string) ($filtered_payload['sale_code'] ?? ''),
             'generalInvoiceInfo' => [
@@ -1403,14 +1547,7 @@ class TGS_Viettel_Invoice_Flow_Service
                 'totalTaxAmount' => $sum_tax,
                 'totalAmountWithTax' => $sum_with_tax,
             ],
-            'metadata' => [
-                [
-                    'keyTag' => 'invoiceNote',
-                    'stringValue' => 'Tự động phát hành từ POS',
-                    'valueType' => 'text',
-                    'keyLabel' => 'Ghi chú',
-                ],
-            ],
+            'metadata' => self::build_invoice_metadata($document_code),
         ];
 
         return [

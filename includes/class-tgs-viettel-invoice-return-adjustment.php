@@ -626,6 +626,10 @@ class TGS_Viettel_Invoice_Return_Adjustment
             'cusGetInvoiceRight' => true,
         ];
 
+        // Mã chứng từ gửi lên Viettel: mã phiếu hoàn của mình. Rỗng (dữ liệu cũ)
+        // thì build_invoice_metadata() tự bỏ trường này, chỉ còn câu diễn giải.
+        $document_code_value = trim((string) ($return['local_ledger_code'] ?? ''));
+
         $sum_with_tax = $sum_before + $sum_tax;
         $payload = [
             'local_ledger_code' => (string) ($return['local_ledger_code'] ?? ''),
@@ -646,12 +650,23 @@ class TGS_Viettel_Invoice_Return_Adjustment
                 'discountAmount' => 0,
                 'isDiscountAmtPos' => false,
             ],
-            'metadata' => [[
-                'keyTag' => 'invoiceNote',
-                'stringValue' => $reference,
-                'valueType' => 'text',
-                'keyLabel' => 'Ghi chú',
-            ]],
+            /*
+             * Hoá đơn điều chỉnh thì MÃ CHỨNG TỪ là mã phiếu hoàn — đó mới là
+             * chứng từ sinh ra hoá đơn này. Câu diễn giải "Phiếu hoàn X: lý do"
+             * truyền vào làm ghi chú dự phòng, nên khi tắt DOCUMENT_CODE_IN_NOTE
+             * (lúc cắm mẫu thật có cột "Mã chứng từ" riêng) ô Ghi chú tự trở về
+             * y như cũ. Lý do hoàn vẫn nằm ở invoiceNote/additionalReferenceDesc
+             * /adjustedNote phía trên nên không bao giờ mất.
+             * Xem TGS_Viettel_Invoice_Flow_Service::build_invoice_metadata().
+             */
+            'metadata' => class_exists('TGS_Viettel_Invoice_Flow_Service')
+                ? TGS_Viettel_Invoice_Flow_Service::build_invoice_metadata($document_code_value, $reference)
+                : [[
+                    'keyTag' => 'invoiceNote',
+                    'stringValue' => $reference,
+                    'valueType' => 'text',
+                    'keyLabel' => 'Ghi chú',
+                ]],
         ];
 
         // Phân loại toàn bộ theo lũy kế tất cả PHH của đơn, không chỉ PHH hiện tại.

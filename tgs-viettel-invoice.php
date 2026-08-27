@@ -4469,14 +4469,11 @@ class TGS_Viettel_Invoice_Plugin
                 'totalTaxAmount' => 1259,
                 'totalAmountWithTax' => 17000,
             ],
-            'metadata' => [
-                [
-                    'keyTag' => 'invoiceNote',
-                    'stringValue' => 'Tao tu plugin TGS Viettel Invoice',
-                    'valueType' => 'text',
-                    'keyLabel' => 'Ghi chu',
-                ],
-            ],
+            // Ghi chu co dinh + ma chung tu (ma phieu ban cua minh).
+            // Xem TGS_Viettel_Invoice_Flow_Service::build_invoice_metadata().
+            'metadata' => class_exists('TGS_Viettel_Invoice_Flow_Service')
+                ? TGS_Viettel_Invoice_Flow_Service::build_invoice_metadata('CNTESTAA10008')
+                : [],
         ];
 
         $cancel_payload_sample = [

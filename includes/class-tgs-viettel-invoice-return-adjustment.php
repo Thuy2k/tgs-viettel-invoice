@@ -58,6 +58,40 @@ class TGS_Viettel_Invoice_Return_Adjustment
             return;
         }
 
+        /*
+         * ─── HOÀN HÀNG CỦA BILL Z: KHÔNG CÓ HOÁ ĐƠN NÀO ĐỂ ĐIỀU CHỈNH ───────
+         *
+         * Bill Z là phiếu xử lý nội bộ, tự nó KHÔNG BAO GIỜ đi thuế (xem
+         * tgs_pos/docs/bill-z-va-hang-tang.md). Trả hàng của phiếu đó thì cũng
+         * chẳng có hoá đơn gốc nào tồn tại để giảm trừ.
+         *
+         * Bản trước rơi vào nhánh "chưa có hoá đơn gốc" và đẻ ra một hàng chờ
+         * trạng thái *blocked* — màn Gửi thuế hiện "Điều chỉnh giảm · Chờ kế
+         * toán" kèm câu đỏ "Đơn bán chưa phát hành hoá đơn thuế", làm kế toán
+         * tưởng có việc treo. Thực ra không có gì phải làm, và mai kia cũng
+         * không bao giờ có: bill Z không đi thuế.
+         *
+         * Vẫn ghi một hàng *skipped* chứ không im lặng — màn Gửi thuế xếp nó
+         * vào nhóm "Không cần gửi", nhìn là biết đã xét tới rồi.
+         */
+        if ($this->sale_is_promo_split_bill($sale_id)) {
+            $message = 'Đơn bán là bill Z (hàng xử lý nội bộ, không khai thuế) nên không có hoá đơn '
+                . 'để điều chỉnh. Hàng và tiền đã hoàn xong.';
+
+            $queue_id = $this->upsert_queue($return_id, $sale_id, [], 'skipped', intval($args['operator_id'] ?? 0));
+            if ($queue_id > 0) {
+                $this->update_queue($queue_id, ['error_message' => $message]);
+            }
+
+            $result['tax_adjustment'] = [
+                'id' => $queue_id,
+                'status' => 'not_required',
+                'message' => $message,
+            ];
+            $result['message'] = trim((string) ($result['message'] ?? '')) . ' ' . $message;
+            return;
+        }
+
         $original = $this->find_original_invoice($sale_id);
         if (empty($original)) {
             /*
@@ -179,6 +213,56 @@ class TGS_Viettel_Invoice_Return_Adjustment
         $result['message'] .= ' Phiếu điều chỉnh thuế đang chờ kiểm tra và xác nhận gửi.';
     }
 
+    /**
+     * Phiếu bán này có phải BILL Z (phiếu tách hàng khuyến mãi) không.
+     *
+     * Xét bằng QUAN HỆ CHA–CON, không chỉ nhìn chữ Z ở cuối mã: mã phiếu đời cũ
+     * sinh ngẫu nhiên nên tự nó có thể kết thúc bằng Z (HD98_9SGEZ — có thật),
+     * và những đơn đó là đơn bán bình thường, vẫn phải điều chỉnh thuế khi hoàn.
+     *
+     * Bill Z thật luôn thoả CẢ HAI: có cha là một phiếu bán, và mã đúng bằng
+     * mã cha nối thêm hậu tố. Xem TGS_POS_Order_Handler::promo_split_code_suffix().
+     */
+    private function sale_is_promo_split_bill($sale_id)
+    {
+        global $wpdb;
+
+        $sale_id = intval($sale_id);
+        if ($sale_id <= 0 || !defined('TGS_TABLE_LOCAL_LEDGER')) {
+            return false;
+        }
+
+        $row = $wpdb->get_row($wpdb->prepare(
+            'SELECT local_ledger_code, local_ledger_parent_id FROM ' . TGS_TABLE_LOCAL_LEDGER
+                . ' WHERE local_ledger_id = %d LIMIT 1',
+            $sale_id
+        ), ARRAY_A);
+
+        $parent_id = intval($row['local_ledger_parent_id'] ?? 0);
+        if (empty($row) || $parent_id <= 0) {
+            return false;
+        }
+
+        $type_sale_order = defined('TGS_LEDGER_TYPE_SALE_ORDER') ? TGS_LEDGER_TYPE_SALE_ORDER : 10;
+        $parent_code = (string) $wpdb->get_var($wpdb->prepare(
+            'SELECT local_ledger_code FROM ' . TGS_TABLE_LOCAL_LEDGER
+                . ' WHERE local_ledger_id = %d AND local_ledger_type = %d LIMIT 1',
+            $parent_id,
+            $type_sale_order
+        ));
+
+        if ($parent_code === '') {
+            return false;
+        }
+
+        $suffix = class_exists('TGS_POS_Order_Handler')
+            ? (string) TGS_POS_Order_Handler::promo_split_code_suffix()
+            : 'Z';
+
+        return strtoupper(trim((string) $row['local_ledger_code']))
+            === strtoupper(trim($parent_code . $suffix));
+    }
+
     private function find_original_invoice($sale_id)
     {
         if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
@@ -261,6 +345,19 @@ class TGS_Viettel_Invoice_Return_Adjustment
                 'invoice_no' => (string) ($queue['adjustment_invoice_no'] ?? ''),
                 'message' => 'Hóa đơn điều chỉnh đã được gửi CQT trước đó.',
             ];
+        }
+
+        /*
+         * Chặn lại cả ở đây, không chỉ lúc phiếu hoàn vừa lập: nút "gửi lại" ở
+         * màn Gửi thuế gọi thẳng vào process(). Bill Z không đi thuế nên bấm
+         * bao nhiêu lần cũng không có hoá đơn nào để điều chỉnh.
+         */
+        if ($this->sale_is_promo_split_bill(intval($queue['sale_ledger_id'] ?? 0))) {
+            $message = 'Đơn bán là bill Z (hàng xử lý nội bộ, không khai thuế) nên không có hoá đơn '
+                . 'để điều chỉnh.';
+            $this->update_queue($queue_id, ['status' => 'skipped', 'error_message' => $message]);
+
+            return ['id' => intval($queue_id), 'status' => 'not_required', 'message' => $message];
         }
 
         $original = $this->get_invoice_record(intval($queue['original_invoice_record_id'] ?? 0));

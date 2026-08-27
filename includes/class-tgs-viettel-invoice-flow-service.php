@@ -100,16 +100,24 @@ class TGS_Viettel_Invoice_Flow_Service
     const DOCUMENT_CODE_KEY_TAGS = ['maChungTu', 'documentCode', 'docNo'];
 
     /*
-     * Có nhét mã phiếu vào ô "Ghi chú" nữa không.
+     * Có nhét mã phiếu vào ô "Ghi chú" nữa không. BẬT — và CỨ ĐỂ BẬT.
      *
-     * BẬT trong lúc còn chạy mẫu test: mẫu test chỉ khai mỗi trường "Ghi chú",
-     * nên đó là ô DUY NHẤT báo cáo chịu hiện — không nhét vào đấy thì kế toán
-     * không thấy mã phiếu ở đâu cả.
+     * Chủ đích: mã phiếu nằm ở CẢ HAI ô, "Ghi chú" lẫn "Mã chứng từ", cho
+     * chắc. Lý do:
      *
-     * TẮT khi cắm sang mẫu thật (mẫu có khai riêng trường "Mã chứng từ"): lúc
-     * đó mã phiếu đã có cột riêng, để nguyên bật thì mã hiện ở CẢ HAI cột và
-     * ô Ghi chú mất câu đánh dấu nguồn POS.
+     *   • Mẫu test chỉ khai mỗi trường "Ghi chú" — không nhét vào đấy thì kế
+     *     toán không thấy mã phiếu ở đâu cả.
+     *   • Mẫu thật có cột "Mã chứng từ", NHƯNG chưa đo được là Viettel khớp
+     *     dữ liệu theo TÊN trường hay theo mã trường nội bộ. Nếu khớp theo mã
+     *     trường mà tag mình đoán không trùng thì cột đó trống — lúc ấy ô Ghi
+     *     chú là chỗ duy nhất còn mã phiếu.
      *
+     * Đánh đổi: ô Ghi chú không còn câu "Tự động phát hành từ POS", và ghi chú
+     * của hoá đơn điều chỉnh không còn câu "Phiếu hoàn X: lý do" (lý do vẫn
+     * nằm nguyên ở invoiceNote/additionalReferenceDesc/adjustedNote trong
+     * generalInvoiceInfo, in ra hoá đơn được).
+     *
+     * Chỉ tắt khi đã chắc cột "Mã chứng từ" ăn và muốn trả ô Ghi chú về câu cũ:
      *     add_filter('tgs_viettel_invoice_document_code_in_note', '__return_false');
      */
     const DOCUMENT_CODE_IN_NOTE = true;

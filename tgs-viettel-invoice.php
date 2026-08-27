@@ -1089,6 +1089,27 @@ class TGS_Viettel_Invoice_Plugin
                 $row['total_after_tax'] = floatval($row['total_after_tax'] ?? 0);
                 $state = sanitize_text_field($row['invoice_state']);
 
+                /*
+                 * ─── ĐƠN MÃ Z KHÔNG PHẢI VIỆC CỦA MÀN NÀY ───────────────────
+                 *
+                 * Bill Z là hàng xử lý nội bộ, không bao giờ gửi thuế. Để nó
+                 * nằm trong danh sách thì quầy thấy một đống dòng "chưa gửi"
+                 * mà bấm gửi cũng không được — đúng thứ gây rối. Muốn xem thì
+                 * vào màn Lịch sử đơn hàng, phiếu vẫn nằm nguyên trong sổ.
+                 *
+                 * Cắt TRƯỚC mọi bộ đếm để con số trên chip luôn khớp số dòng
+                 * bên dưới. Đơn nào lỡ đã gửi thật thì vẫn hiện, vì lúc đó nó
+                 * là chứng từ thuế thật.
+                 */
+                $is_promo_only_row = (!empty($row['is_promo_only']) || !empty($row['is_promo_split_ticket']))
+                    && !in_array($state, ['done', 'issued'], true);
+                if ($is_promo_only_row) {
+                    $row['_matches_filters'] = false;
+                    unset($row['local_ledger_item_id']);
+                    unset($row['issue_response_payload']);
+                    continue;
+                }
+
                 $age_counts['all']++;
                 if ($row['age_group'] === 'under24') {
                     $age_counts['under24']++;
@@ -1230,6 +1251,17 @@ class TGS_Viettel_Invoice_Plugin
                     $scope = ($original_total > 0 && abs($after - $original_total) < 1)
                         ? 'full'
                         : 'partial';
+
+                    /*
+                     * Hoàn hàng của bill Z, hay phần hàng trả vốn không nằm
+                     * trên hoá đơn nào: không có việc gì để làm. Cùng lý do
+                     * với đơn mã Z ở trên — màn này chỉ giữ ba trạng thái
+                     * chưa gửi / gửi lỗi / thành công. Vết tích vẫn còn nguyên
+                     * trong bảng hàng chờ điều chỉnh.
+                     */
+                    if ($state === 'skipped') {
+                        continue;
+                    }
 
                     $matches_status = true;
                     if ($status_filter === 'success') {

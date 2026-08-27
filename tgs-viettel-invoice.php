@@ -984,6 +984,7 @@ class TGS_Viettel_Invoice_Plugin
                     l.local_ledger_id AS sale_ledger_id,
                     l.local_ledger_code,
                     l.local_ledger_item_id,
+                    parent.local_ledger_code AS parent_sale_code,
                     vi.local_viettel_invoice_id,
                     vi.invoice_state,
                     vi.issue_status,
@@ -1001,6 +1002,9 @@ class TGS_Viettel_Invoice_Plugin
                     COALESCE(vi.updated_at, l.updated_at) AS updated_at,
                     COALESCE(vi.created_at, l.created_at) AS created_at
                 FROM " . TGS_TABLE_LOCAL_LEDGER . " l
+                LEFT JOIN " . TGS_TABLE_LOCAL_LEDGER . " parent
+                    ON parent.local_ledger_id = l.local_ledger_parent_id
+                   AND parent.local_ledger_type = l.local_ledger_type
                 LEFT JOIN (
                     SELECT vi1.*
                     FROM " . TGS_TABLE_LOCAL_VIETTEL_INVOICE . " vi1
@@ -1090,17 +1094,27 @@ class TGS_Viettel_Invoice_Plugin
                 $state = sanitize_text_field($row['invoice_state']);
 
                 /*
-                 * ─── ĐƠN MÃ Z KHÔNG PHẢI VIỆC CỦA MÀN NÀY ───────────────────
+                 * ─── BILL Z KHÔNG PHẢI VIỆC CỦA MÀN NÀY ─────────────────────
                  *
                  * Bill Z là hàng xử lý nội bộ, không bao giờ gửi thuế. Để nó
                  * nằm trong danh sách thì quầy thấy một đống dòng "chưa gửi"
                  * mà bấm gửi cũng không được — đúng thứ gây rối. Muốn xem thì
                  * vào màn Lịch sử đơn hàng, phiếu vẫn nằm nguyên trong sổ.
                  *
+                 * NHẬN DIỆN BẰNG QUAN HỆ CHA–CON, KHÔNG BẰNG MÃ HÀNG BÊN TRONG.
+                 * Bill Z nay chứa cả dòng SKU thường (nhân viên chuyển tay ở màn
+                 * review), và có lúc rỗng không còn dòng nào — hai trường hợp đó
+                 * đều KHÔNG khớp luật "đơn toàn mã Z" nên vẫn lọt vào danh sách.
+                 * Xét theo cha–con thì bill Z nào cũng bị cắt, đúng như luồng.
+                 *
+                 * Vẫn giữ luật cũ cho dữ liệu đời trước: đơn toàn mã Z mà không
+                 * có phiếu cha (bán trước khi có tách bill) cũng không phải gửi.
+                 *
                  * Cắt TRƯỚC mọi bộ đếm để con số trên chip luôn khớp số dòng
                  * bên dưới. Đơn nào lỡ đã gửi thật thì vẫn hiện, vì lúc đó nó
                  * là chứng từ thuế thật.
                  */
+                $row['is_promo_split_ticket'] = $this->is_promo_split_bill_row($row) ? 1 : 0;
                 $is_promo_only_row = (!empty($row['is_promo_only']) || !empty($row['is_promo_split_ticket']))
                     && !in_array($state, ['done', 'issued'], true);
                 if ($is_promo_only_row) {
@@ -1155,6 +1169,7 @@ class TGS_Viettel_Invoice_Plugin
                 $row['_matches_filters'] = $matches_status && $matches_age && $matches_document;
                 unset($row['local_ledger_item_id']);
                 unset($row['issue_response_payload']);
+                unset($row['parent_sale_code']);
             }
             unset($row);
 
@@ -3152,6 +3167,31 @@ class TGS_Viettel_Invoice_Plugin
      * Gộp vào một vòng quét vì cả hai đều cần đúng danh sách item đó; tách ra
      * là nhân đôi truy vấn cho mỗi lần mở danh sách.
      */
+    /**
+     * Dòng này có phải BILL Z (phiếu tách hàng khuyến mãi) không.
+     *
+     * Xét bằng quan hệ cha–con: mã phiếu đúng bằng mã phiếu CHA nối thêm hậu
+     * tố. Không nhìn mỗi chữ Z ở cuối mã — mã phiếu đời cũ sinh ngẫu nhiên nên
+     * tự nó có thể kết thúc bằng Z (HD113_QFXFZ — có thật) mà vẫn là đơn bán
+     * bình thường, cắt nhầm là quầy mất luôn đơn khỏi màn gửi thuế.
+     *
+     * Cùng một luật với TGS_POS_Promo_Split_Service bên tgs_pos.
+     */
+    private function is_promo_split_bill_row(array $row)
+    {
+        $parent_code = trim((string) ($row['parent_sale_code'] ?? ''));
+        $code = trim((string) ($row['local_ledger_code'] ?? ''));
+        if ($parent_code === '' || $code === '') {
+            return false;
+        }
+
+        $suffix = class_exists('TGS_POS_Order_Handler')
+            ? (string) TGS_POS_Order_Handler::promo_split_code_suffix()
+            : 'Z';
+
+        return strtoupper($code) === strtoupper($parent_code . $suffix);
+    }
+
     private function compute_under24_main_flags_for_sale_rows($rows)
     {
         $empty_result = ['under24' => [], 'promo_only' => []];

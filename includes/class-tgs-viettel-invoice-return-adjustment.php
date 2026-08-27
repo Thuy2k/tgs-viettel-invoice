@@ -263,6 +263,95 @@ class TGS_Viettel_Invoice_Return_Adjustment
             === strtoupper(trim($parent_code . $suffix));
     }
 
+    /**
+     * Hoá đơn gốc của đơn bán vừa gửi CQT xong → gỡ khoá mấy phiếu hoàn đang
+     * kẹt ở "chờ kế toán" của chính đơn đó.
+     *
+     * Chỉ đưa về trạng thái *pending* (đã dựng sẵn payload, chờ xác nhận gửi),
+     * KHÔNG tự phát hành hoá đơn điều chỉnh. Phát hành là việc phải có người
+     * bấm — y như luồng hoàn hàng bình thường.
+     *
+     * @return int Số phiếu hoàn đã gỡ.
+     */
+    public function unblock_for_sale($sale_ledger_id)
+    {
+        global $wpdb;
+
+        $sale_ledger_id = intval($sale_ledger_id);
+        if ($sale_ledger_id <= 0) {
+            return 0;
+        }
+
+        $table = $this->table();
+        if ($wpdb->get_var("SHOW TABLES LIKE '" . esc_sql($table) . "'") !== $table) {
+            return 0;
+        }
+
+        $queue_ids = array_map('intval', (array) $wpdb->get_col($wpdb->prepare(
+            "SELECT id FROM {$table}
+              WHERE sale_ledger_id = %d AND blog_id = %d AND status = 'blocked'",
+            $sale_ledger_id,
+            get_current_blog_id()
+        )));
+
+        if (empty($queue_ids)) {
+            return 0;
+        }
+
+        // Hoá đơn gốc phải THẬT SỰ xong: phát hành OK và đã gửi CQT OK.
+        $original = $this->find_original_invoice($sale_ledger_id);
+        if (
+            empty($original)
+            || intval($original['issue_status'] ?? 0) !== 1
+            || intval($original['send_cqt_status'] ?? 0) !== 1
+        ) {
+            return 0;
+        }
+
+        $unblocked = 0;
+        foreach ($queue_ids as $queue_id) {
+            $queue = $this->get_queue($queue_id);
+            if (empty($queue) || ($queue['status'] ?? '') !== 'blocked') {
+                continue;
+            }
+
+            $queue['original_invoice_record_id'] = intval($original['local_viettel_invoice_id'] ?? 0);
+            $built = $this->build_payload($queue, $original);
+
+            /*
+             * Phần hàng trả lại vốn không nằm trên hoá đơn (quà, hàng 0đ) thì
+             * đóng luôn ở "không cần gửi" — đúng cách process() vẫn xử lý.
+             */
+            if (empty($built['success']) && ($built['reason'] ?? '') === 'no_invoiced_line') {
+                $this->update_queue($queue_id, [
+                    'original_invoice_record_id' => intval($original['local_viettel_invoice_id'] ?? 0),
+                    'original_invoice_no' => $this->original_invoice_id($original),
+                    'status' => 'skipped',
+                    'error_message' => 'Phần hàng trả lại vốn không nằm trên hoá đơn thuế nên không cần '
+                        . 'lập hoá đơn điều chỉnh.',
+                ]);
+                $unblocked++;
+                continue;
+            }
+
+            if (empty($built['success'])) {
+                continue;   // dựng payload còn hỏng thì cứ để nguyên chờ kế toán
+            }
+
+            $this->update_queue($queue_id, [
+                'original_invoice_record_id' => intval($original['local_viettel_invoice_id'] ?? 0),
+                'original_invoice_no' => $this->original_invoice_id($original),
+                'status' => 'pending',
+                'transaction_uuid' => $built['transaction_uuid'],
+                'request_payload' => wp_json_encode($built['payload'], JSON_UNESCAPED_UNICODE),
+                'error_message' => '',
+            ]);
+            $unblocked++;
+        }
+
+        return $unblocked;
+    }
+
     private function find_original_invoice($sale_id)
     {
         if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {

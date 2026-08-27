@@ -1226,6 +1226,38 @@ class TGS_Viettel_Invoice_Plugin
                 $wpdb->esc_like($return_table)
             )) === $return_table;
 
+            /*
+             * ─── TỰ GỠ MẤY PHIẾU HOÀN KẸT TỪ TRƯỚC ──────────────────────────
+             *
+             * Từ nay hoá đơn bán gửi xong là gỡ khoá ngay (xem
+             * update_auto_flow_tracking). Nhưng phiếu hoàn bị kẹt TRƯỚC khi có
+             * cái móc đó thì không ai đụng tới nữa — mở màn này là gỡ luôn.
+             *
+             * Chỉ đụng tới đơn ĐÃ CÓ hoá đơn gốc xong xuôi, và giới hạn 20 đơn
+             * mỗi lần mở màn, nên không biến một lần xem danh sách thành hàng
+             * trăm câu truy vấn.
+             */
+            if ($table_exists && class_exists('TGS_Viettel_Invoice_Return_Adjustment')) {
+                $stuck_sale_ids = array_map('intval', (array) $wpdb->get_col($wpdb->prepare(
+                    "SELECT DISTINCT q.sale_ledger_id
+                       FROM {$return_table} q
+                       INNER JOIN " . TGS_TABLE_LOCAL_VIETTEL_INVOICE . " vi
+                          ON vi.sale_ledger_id = q.sale_ledger_id
+                      WHERE q.blog_id = %d
+                        AND q.status = 'blocked'
+                        AND vi.issue_status = 1
+                        AND vi.send_cqt_status = 1
+                        AND vi.invoice_state = 'done'
+                      LIMIT 20",
+                    get_current_blog_id()
+                )));
+
+                $return_service = TGS_Viettel_Invoice_Return_Adjustment::instance($this);
+                foreach ($stuck_sale_ids as $stuck_sale_id) {
+                    $return_service->unblock_for_sale($stuck_sale_id);
+                }
+            }
+
             if ($table_exists) {
                 $return_sql = "SELECT
                         q.id AS queue_id,
@@ -4324,6 +4356,36 @@ class TGS_Viettel_Invoice_Plugin
 
         global $wpdb;
         $wpdb->update(TGS_TABLE_LOCAL_VIETTEL_INVOICE, $data, ['local_viettel_invoice_id' => intval($tracking_id)]);
+
+        /*
+         * ─── HOÁ ĐƠN GỐC VỪA XONG THÌ GỠ KHOÁ PHIẾU HOÀN ĐANG CHỜ ───────────
+         *
+         * Quầy hay hoàn hàng TRƯỚC khi đơn bán kịp gửi thuế (nhân viên bấm
+         * hoãn gửi, hoặc gửi lỗi rồi gửi lại sau). Lúc lập phiếu hoàn chưa có
+         * hoá đơn gốc nên nó nằm ở "chờ kế toán" — nhưng khi hoá đơn gốc gửi
+         * xong thì KHÔNG AI đụng vào hàng chờ đó nữa, nó treo mãi và kế toán
+         * tưởng còn việc dở.
+         *
+         * Đặt móc ở đây vì đây là chốt duy nhất mà MỌI đường phát hành đều
+         * chảy qua (gửi tự động sau khi bán, gửi tay ở POS, gửi lại ở trang
+         * quản trị, luồng điều chỉnh). Móc ở từng đường thì sớm muộn thêm
+         * đường mới là quên.
+         */
+        $done = (string) ($data['invoice_state'] ?? '') === 'done'
+            && intval($data['send_cqt_status'] ?? 0) === 1;
+        if (!$done || !class_exists('TGS_Viettel_Invoice_Return_Adjustment')) {
+            return;
+        }
+
+        $sale_ledger_id = intval($wpdb->get_var($wpdb->prepare(
+            'SELECT sale_ledger_id FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE
+                . ' WHERE local_viettel_invoice_id = %d LIMIT 1',
+            intval($tracking_id)
+        )));
+
+        if ($sale_ledger_id > 0) {
+            TGS_Viettel_Invoice_Return_Adjustment::instance($this)->unblock_for_sale($sale_ledger_id);
+        }
     }
 
     private function extract_transaction_uuid($response)

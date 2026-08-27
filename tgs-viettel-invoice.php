@@ -1115,7 +1115,20 @@ class TGS_Viettel_Invoice_Plugin
                  * là chứng từ thuế thật.
                  */
                 $row['is_promo_split_ticket'] = $this->is_promo_split_bill_row($row) ? 1 : 0;
-                $is_promo_only_row = (!empty($row['is_promo_only']) || !empty($row['is_promo_split_ticket']))
+
+                /*
+                 * BILL CHÍNH KHÔNG CÒN DÒNG NÀO CŨNG KHÔNG PHẢI VIỆC Ở ĐÂY.
+                 *
+                 * Nhân viên chuyển hết dòng xuống bill Z ngay tại màn gửi lại
+                 * thì phiếu này còn đúng cái vỏ: bấm gửi cũng chỉ nhận
+                 * "không có dòng nào phải gửi thuế". Để nó nằm trong danh sách
+                 * là bắt quầy đọc rồi bỏ qua mãi. Phiếu vẫn nằm nguyên trong
+                 * sổ, xem ở màn Lịch sử đơn hàng.
+                 */
+                $line_ids = json_decode((string) ($row['local_ledger_item_id'] ?? ''), true);
+                $has_no_lines = !is_array($line_ids) || empty(array_filter(array_map('intval', $line_ids)));
+
+                $is_promo_only_row = (!empty($row['is_promo_only']) || !empty($row['is_promo_split_ticket']) || $has_no_lines)
                     && !in_array($state, ['done', 'issued'], true);
                 if ($is_promo_only_row) {
                     $row['_matches_filters'] = false;

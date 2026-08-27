@@ -980,11 +980,28 @@ class TGS_Viettel_Invoice_Plugin
         $limit = 500;
         $sale_order_type = defined('TGS_LEDGER_TYPE_SALE_ORDER') ? intval(TGS_LEDGER_TYPE_SALE_ORDER) : 10;
 
+        /*
+         * Hậu tố phiếu tách, nhét thẳng vào SQL nên phải esc_sql: nó là hằng
+         * số trong code ('Z') chứ không phải dữ liệu người dùng, nhưng filter
+         * `tgs_pos_promo_split_code_suffix` đổi được nên vẫn coi là biến.
+         */
+        $promo_suffix = class_exists('TGS_POS_Order_Handler')
+            ? (string) TGS_POS_Order_Handler::promo_split_code_suffix()
+            : 'Z';
+        $promo_suffix_sql = esc_sql($promo_suffix);
+
         $sql = "SELECT
                     l.local_ledger_id AS sale_ledger_id,
                     l.local_ledger_code,
                     l.local_ledger_item_id,
                     parent.local_ledger_code AS parent_sale_code,
+                    (SELECT child.local_ledger_code
+                       FROM " . TGS_TABLE_LOCAL_LEDGER . " child
+                      WHERE child.local_ledger_parent_id = l.local_ledger_id
+                        AND child.local_ledger_type = l.local_ledger_type
+                        AND (child.is_deleted = 0 OR child.is_deleted IS NULL)
+                        AND child.local_ledger_code = CONCAT(l.local_ledger_code, '{$promo_suffix_sql}')
+                      LIMIT 1) AS promo_split_code,
                     vi.local_viettel_invoice_id,
                     vi.invoice_state,
                     vi.issue_status,
@@ -1183,6 +1200,7 @@ class TGS_Viettel_Invoice_Plugin
                 unset($row['local_ledger_item_id']);
                 unset($row['issue_response_payload']);
                 unset($row['parent_sale_code']);
+                $row['promo_split_code'] = (string) ($row['promo_split_code'] ?? '');
             }
             unset($row);
 

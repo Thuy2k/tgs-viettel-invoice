@@ -479,16 +479,20 @@ class TGS_Viettel_Invoice_Flow_Service
      *    "data":"Đơn giá của hàng hóa có phần thập phân tối đa N ký tự"}
      *
      * Con số N KHÔNG cố định: nó là cấu hình "số chữ số thập phân của đơn giá"
-     * bên phía Viettel/CQT. Trước đây N = 4, từ 24/08/2026 hệ thống trả về
-     * N = 0 — tức đơn giá phải là số nguyên. Vì vậy để một chỗ duy nhất, đổi
-     * hằng số (hoặc móc filter) là cả hoá đơn gốc lẫn hoá đơn điều chỉnh cùng
-     * đổi theo, không phải đi sửa từng chỗ rồi lệch nhau.
+     * bên phía Viettel/CQT. Từ 24/08/2026 tới 09/2026 hệ thống trả về N = 0
+     * (đơn giá phải là số nguyên) — kế toán đã xác nhận lại với Viettel,
+     * giờ đơn giá được phép có phần lẻ nên chốt N = 2 (đơn giá 2 số thập
+     * phân, khớp đúng "cơ chế làm tròn ra hoá đơn: thuế 2 số" — báo cáo quản
+     * trị nội bộ dùng 4 số, xem `mo-hinh-tien-va-bang-local-ledger-item.md`).
+     * Để một chỗ duy nhất, đổi hằng số (hoặc móc filter) là cả hoá đơn gốc
+     * lẫn hoá đơn điều chỉnh cùng đổi theo, không phải đi sửa từng chỗ rồi
+     * lệch nhau.
      *
-     * KHÔNG ảnh hưởng số tiền: ba con số quyết định của dòng
-     * (itemTotalAmountWithoutTax / WithTax / taxAmount) đã chốt theo đúng số
-     * khách trả, unitPrice chỉ là số hiển thị trên tờ hoá đơn.
+     * KHÔNG ảnh hưởng số tiền khách trả: itemTotalAmountWithTax luôn chốt
+     * theo đúng số đã thu (tròn đồng); unitPrice/withoutTax/taxAmount là ba
+     * số CÒN LẠI được phép mang phần lẻ theo N này.
      */
-    const UNIT_PRICE_DECIMALS = 0;
+    const UNIT_PRICE_DECIMALS = 2;
 
     public static function unit_price_decimals()
     {
@@ -610,14 +614,24 @@ class TGS_Viettel_Invoice_Flow_Service
             return $api_price;
         }
 
+        /*
+         * ⚠️ So khớp "đã tròn, khỏi nắn" phải xét ở ĐÚNG $decimals chữ số lẻ
+         * Viettel đang cho phép, KHÔNG phải luôn so với số nguyên — nếu không,
+         * khi $decimals > 0 thì tích gần như không bao giờ là số nguyên tuyệt
+         * đối, mọi dòng đều rơi vào vòng dò bên dưới đi tìm một đơn giá cho
+         * tích ra SỐ NGUYÊN, vô tình lại ép về đúng hành vi "đơn giá nguyên"
+         * đã bỏ. Ở decimals = 0 thì round($x, 0) === round($x), hành vi cũ
+         * không đổi một chút nào.
+         */
+        $decimals = self::unit_price_decimals();
+
         $tich = $api_price * $quantity;
-        if (abs($tich - round($tich)) < 1e-6) {
+        if (abs($tich - round($tich, $decimals)) < 1e-6) {
             return $api_price;
         }
 
-        $decimals = self::unit_price_decimals();
-        $factor   = pow(10, $decimals);
-        $n0       = (int) round($api_price * $factor);
+        $factor = pow(10, $decimals);
+        $n0     = (int) round($api_price * $factor);
 
         for ($i = 1; $i <= self::NAN_DON_GIA_TOI_DA; $i++) {
             // Ưu tiên nhích LÊN, để hoá đơn không khai thiếu hơn số đã thu.
@@ -627,7 +641,7 @@ class TGS_Viettel_Invoice_Flow_Service
                     continue;
                 }
                 $thu = $n * $quantity / $factor;
-                if (abs($thu - round($thu)) < 1e-6) {
+                if (abs($thu - round($thu, $decimals)) < 1e-6) {
                     return $decimals === 0
                         ? (int) round($n / $factor)
                         : (float) sprintf('%.' . $decimals . 'F', $n / $factor);
@@ -641,17 +655,22 @@ class TGS_Viettel_Invoice_Flow_Service
     public static function api_line_amounts($quantity, $unit_price, $with_tax, $tax_percent)
     {
         $quantity = max(0.0, (float) $quantity);
+        $decimals = self::unit_price_decimals();
+        // $with_tax là số khách ĐÃ TRẢ (chốt ở lúc bán) — luôn tròn đồng,
+        // không phụ thuộc $decimals của đơn giá gửi Viettel.
         $with_tax = max(0, (int) round($with_tax));
 
         /*
          * Thuế 0% / KCT: tiền thuế phải bằng 0 nên không có chỗ dồn phần lẻ —
          * đây là trường hợp duy nhất tiền dòng trên hoá đơn buộc phải xê dịch
          * so với bill. Chốt LÀM TRÒN LÊN để hoá đơn không bao giờ khai thiếu
-         * hơn số đã thu: 100.000 chia 3 → đơn giá 33.334, dòng ra 100.002.
+         * hơn số đã thu: 100.000 chia 3 → đơn giá 33.334, dòng ra 100.002
+         * (ở $decimals = 0; với $decimals = 2 phần dôi chỉ còn tối đa 0,01đ
+         * × số lượng thay vì cả đồng).
          */
         if ((float) $tax_percent <= 0) {
             $api_price   = self::nan_don_gia_cho_tron_dong(self::api_unit_price($unit_price, true), $quantity, true);
-            $without_tax = max(0, (int) round($api_price * $quantity));
+            $without_tax = max(0, round($api_price * $quantity, $decimals));
 
             return [
                 'unit_price'  => $api_price,
@@ -662,7 +681,10 @@ class TGS_Viettel_Invoice_Flow_Service
         }
 
         $api_price   = self::nan_don_gia_cho_tron_dong(self::api_unit_price($unit_price), $quantity);
-        $without_tax = max(0, (int) round($api_price * $quantity));
+        // KHÔNG ép (int): unitPrice × quantity giờ được phép có phần lẻ tới
+        // $decimals chữ số — đây chính là chỗ trước kia dồn hết phần lẻ vào
+        // tiền thuế vì withoutTax bị ép nguyên.
+        $without_tax = max(0, round($api_price * $quantity, $decimals));
 
         // Chặn tiền thuế âm nếu đơn giá làm tròn lên vượt cả số đã thu.
         $with_tax = max($with_tax, $without_tax);
@@ -671,7 +693,7 @@ class TGS_Viettel_Invoice_Flow_Service
             'unit_price'  => $api_price,
             'without_tax' => $without_tax,
             'with_tax'    => $with_tax,
-            'tax_amount'  => $with_tax - $without_tax,
+            'tax_amount'  => round($with_tax - $without_tax, $decimals),
         ];
     }
 

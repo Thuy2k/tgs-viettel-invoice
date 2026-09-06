@@ -1000,7 +1000,7 @@ class TGS_Viettel_Invoice_Plugin
                       WHERE child.local_ledger_parent_id = l.local_ledger_id
                         AND child.local_ledger_type = l.local_ledger_type
                         AND (child.is_deleted = 0 OR child.is_deleted IS NULL)
-                        AND child.local_ledger_code = CONCAT(l.local_ledger_code, '{$promo_suffix_sql}')
+                        AND child.local_ledger_code LIKE CONCAT('%', '{$promo_suffix_sql}')
                       LIMIT 1) AS promo_split_code,
                     vi.local_viettel_invoice_id,
                     vi.invoice_state,
@@ -3233,26 +3233,27 @@ class TGS_Viettel_Invoice_Plugin
     /**
      * Dòng này có phải BILL Z (phiếu tách hàng khuyến mãi) không.
      *
-     * Xét bằng quan hệ cha–con: mã phiếu đúng bằng mã phiếu CHA nối thêm hậu
-     * tố. Không nhìn mỗi chữ Z ở cuối mã — mã phiếu đời cũ sinh ngẫu nhiên nên
+     * Xét bằng quan hệ cha–con: dòng CÓ phiếu cha VÀ mã kết thúc bằng hậu tố
+     * "Z". Không nhìn MỖI chữ Z ở cuối mã — mã phiếu đời cũ sinh ngẫu nhiên nên
      * tự nó có thể kết thúc bằng Z (HD113_QFXFZ — có thật) mà vẫn là đơn bán
-     * bình thường, cắt nhầm là quầy mất luôn đơn khỏi màn gửi thuế.
+     * bình thường; nhưng chúng KHÔNG có phiếu cha nên vẫn bị loại.
      *
-     * Cùng một luật với TGS_POS_Promo_Split_Service bên tgs_pos.
+     * Không so "mã con === mã cha + Z" vì bill Z dạng mới là {shop}Z{số}Z,
+     * KHÁC {shop}AA{số} + "Z". Cùng luật với TGS_POS_Promo_Split_Service.
      */
     private function is_promo_split_bill_row(array $row)
     {
         $parent_code = trim((string) ($row['parent_sale_code'] ?? ''));
-        $code = trim((string) ($row['local_ledger_code'] ?? ''));
+        $code = strtoupper(trim((string) ($row['local_ledger_code'] ?? '')));
         if ($parent_code === '' || $code === '') {
             return false;
         }
 
         $suffix = class_exists('TGS_POS_Order_Handler')
-            ? (string) TGS_POS_Order_Handler::promo_split_code_suffix()
+            ? strtoupper((string) TGS_POS_Order_Handler::promo_split_code_suffix())
             : 'Z';
 
-        return strtoupper($code) === strtoupper($parent_code . $suffix);
+        return $suffix !== '' && substr($code, -strlen($suffix)) === $suffix;
     }
 
     private function compute_under24_main_flags_for_sale_rows($rows)

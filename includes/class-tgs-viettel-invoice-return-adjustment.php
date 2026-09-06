@@ -220,8 +220,10 @@ class TGS_Viettel_Invoice_Return_Adjustment
      * sinh ngẫu nhiên nên tự nó có thể kết thúc bằng Z (HD98_9SGEZ — có thật),
      * và những đơn đó là đơn bán bình thường, vẫn phải điều chỉnh thuế khi hoàn.
      *
-     * Bill Z thật luôn thoả CẢ HAI: có cha là một phiếu bán, và mã đúng bằng
-     * mã cha nối thêm hậu tố. Xem TGS_POS_Order_Handler::promo_split_code_suffix().
+     * Bill Z thật luôn thoả CẢ HAI: có cha là một phiếu bán, và mã kết thúc
+     * bằng hậu tố "Z". Không so "mã con === mã cha + Z": bill Z dạng mới là
+     * {shop}Z{số}Z, KHÁC {shop}AA{số} + "Z". Xem
+     * TGS_POS_Order_Handler::promo_split_code_suffix().
      */
     private function sale_is_promo_split_bill($sale_id)
     {
@@ -256,11 +258,12 @@ class TGS_Viettel_Invoice_Return_Adjustment
         }
 
         $suffix = class_exists('TGS_POS_Order_Handler')
-            ? (string) TGS_POS_Order_Handler::promo_split_code_suffix()
+            ? strtoupper((string) TGS_POS_Order_Handler::promo_split_code_suffix())
             : 'Z';
 
-        return strtoupper(trim((string) $row['local_ledger_code']))
-            === strtoupper(trim($parent_code . $suffix));
+        $code = strtoupper(trim((string) $row['local_ledger_code']));
+
+        return $suffix !== '' && substr($code, -strlen($suffix)) === $suffix;
     }
 
     /**

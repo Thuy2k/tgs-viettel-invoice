@@ -362,14 +362,24 @@ class TGS_Viettel_Invoice_Return_Adjustment
         }
 
         global $wpdb;
+        /*
+         * Nhận cả hoá đơn 'issue' LẪN 'replacement': nếu hoá đơn gốc đã bị THAY
+         * THẾ thì điều chỉnh giảm phải nhắm vào hoá đơn THAY THẾ mới, không phải
+         * hoá đơn gốc đã bị vô hiệu. Loại thẳng bản ghi `invoice_state='replaced'`
+         * và lấy id lớn nhất còn lại (bản thay thế mới nhất, hoặc hoá đơn gốc nếu
+         * chưa từng thay thế).
+         */
         $row = $wpdb->get_row($wpdb->prepare(
             'SELECT * FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . '
              WHERE sale_ledger_id = %d
-               AND request_mode = %s
+               AND request_mode IN (%s, %s)
+               AND (invoice_state IS NULL OR invoice_state <> %s)
                AND (is_deleted = 0 OR is_deleted IS NULL)
              ORDER BY local_viettel_invoice_id DESC LIMIT 1',
             $sale_id,
-            'issue'
+            'issue',
+            'replacement',
+            'replaced'
         ), ARRAY_A);
 
         return is_array($row) ? $row : [];
@@ -453,9 +463,13 @@ class TGS_Viettel_Invoice_Return_Adjustment
         }
 
         $original = $this->get_invoice_record(intval($queue['original_invoice_record_id'] ?? 0));
-        if (empty($original) || intval($original['issue_status'] ?? 0) !== 1 || intval($original['send_cqt_status'] ?? 0) !== 1) {
-            // Có thể kế toán đã phát hành/gửi lại thành công thành một bản ghi mới
-            // sau lúc phiếu hoàn bị blocked. Luôn làm mới liên kết trước khi dừng.
+        // Hoá đơn gốc đã bị THAY THẾ sau khi phiếu hoàn được lập → phải chuyển
+        // sang điều chỉnh cho hoá đơn THAY THẾ mới, không giữ hoá đơn đã vô hiệu.
+        $original_replaced = !empty($original) && sanitize_key($original['invoice_state'] ?? '') === 'replaced';
+        if ($original_replaced
+            || empty($original) || intval($original['issue_status'] ?? 0) !== 1 || intval($original['send_cqt_status'] ?? 0) !== 1) {
+            // Có thể kế toán đã phát hành/gửi lại/thay thế thành công thành một
+            // bản ghi mới sau lúc phiếu hoàn bị blocked. Luôn làm mới liên kết.
             $latest_original = $this->find_original_invoice(intval($queue['sale_ledger_id'] ?? 0));
             if (!empty($latest_original) && intval($latest_original['issue_status'] ?? 0) === 1 && intval($latest_original['send_cqt_status'] ?? 0) === 1) {
                 $original = $latest_original;
@@ -1159,8 +1173,10 @@ class TGS_Viettel_Invoice_Return_Adjustment
 
         $original = $this->get_invoice_record(intval($queue['original_invoice_record_id'] ?? 0));
         if (empty($original)
+            || sanitize_key($original['invoice_state'] ?? '') === 'replaced'
             || intval($original['issue_status'] ?? 0) !== 1
             || intval($original['send_cqt_status'] ?? 0) !== 1) {
+            // Hoá đơn gốc đã bị thay thế → dựng preview theo hoá đơn thay thế mới.
             $latest_original = $this->find_original_invoice(intval($queue['sale_ledger_id'] ?? 0));
             if (!empty($latest_original)) {
                 $original = $latest_original;

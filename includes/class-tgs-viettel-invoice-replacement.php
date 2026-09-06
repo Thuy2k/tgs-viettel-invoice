@@ -151,6 +151,13 @@ class TGS_Viettel_Invoice_Replacement
             ];
         }
 
+        // Đơn đã có PHIẾU HOÀN / hoá đơn điều chỉnh giảm → Viettel không cho lập
+        // hoá đơn thay thế cho hoá đơn đã bị điều chỉnh. Chặn ngay.
+        $blocked = $this->blocked_by_return_adjustment($sale_id);
+        if ($blocked !== '') {
+            return ['success' => false, 'status' => 'error', 'message' => $blocked];
+        }
+
         $corrected_buyer = $this->sanitize_buyer($corrected_buyer);
         $reason = trim(sanitize_textarea_field((string) $reason));
 
@@ -399,6 +406,52 @@ class TGS_Viettel_Invoice_Replacement
             $out['buyerTaxCode'] = preg_replace('/[^0-9\-]/', '', $out['buyerTaxCode']);
         }
         return $out;
+    }
+
+    /**
+     * '' = cho phép thay thế. Chuỗi != '' = lý do bị chặn.
+     * Chặn khi đơn đã có phiếu hoàn (local_ledger type 11) HOẶC đã có hàng đợi
+     * điều chỉnh giảm (return_adjustments) chưa bị bỏ qua.
+     */
+    private function blocked_by_return_adjustment($sale_id)
+    {
+        global $wpdb;
+        $sale_id = (int) $sale_id;
+
+        if (defined('TGS_TABLE_LOCAL_LEDGER')) {
+            $ret = (int) $wpdb->get_var($wpdb->prepare(
+                'SELECT COUNT(*) FROM ' . TGS_TABLE_LOCAL_LEDGER . '
+                  WHERE local_ledger_parent_id = %d
+                    AND local_ledger_type = 11
+                    AND (is_deleted = 0 OR is_deleted IS NULL)',
+                $sale_id
+            ));
+            if ($ret > 0) {
+                return 'Đơn bán đã có phiếu hoàn hàng — Viettel không cho lập hoá đơn thay thế cho '
+                    . 'hoá đơn đã bị điều chỉnh giảm. Xử lý qua điều chỉnh, hoặc liên hệ Viettel.';
+            }
+        }
+
+        $adj_table = '';
+        if (class_exists('TGS_Viettel_Invoice_Clusters')) {
+            $t = TGS_Viettel_Invoice_Clusters::instance()->tables();
+            $adj_table = (string) ($t['return_adjustments'] ?? '');
+        }
+        if ($adj_table !== ''
+            && $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $adj_table)) === $adj_table) {
+            $cnt = (int) $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM {$adj_table}
+                  WHERE blog_id = %d AND sale_ledger_id = %d
+                    AND status NOT IN ('skipped', 'not_required')",
+                get_current_blog_id(),
+                $sale_id
+            ));
+            if ($cnt > 0) {
+                return 'Đơn bán đã có yêu cầu điều chỉnh giảm (hoàn hàng) — không lập hoá đơn thay thế được.';
+            }
+        }
+
+        return '';
     }
 
     private function find_original_invoice($sale_id)

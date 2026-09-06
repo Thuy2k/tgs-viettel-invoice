@@ -37,6 +37,11 @@ if (file_exists($tgs_viettel_return_adjustment_file)) {
     require_once $tgs_viettel_return_adjustment_file;
 }
 
+$tgs_viettel_replacement_file = TGS_VIETTEL_INVOICE_PLUGIN_DIR . 'includes/class-tgs-viettel-invoice-replacement.php';
+if (file_exists($tgs_viettel_replacement_file)) {
+    require_once $tgs_viettel_replacement_file;
+}
+
 class TGS_Viettel_Invoice_Plugin
 {
     const OPTION_SETTINGS = 'tgs_viettel_invoice_settings';
@@ -64,6 +69,9 @@ class TGS_Viettel_Invoice_Plugin
         }
         if (class_exists('TGS_Viettel_Invoice_Return_Adjustment')) {
             TGS_Viettel_Invoice_Return_Adjustment::instance($this);
+        }
+        if (class_exists('TGS_Viettel_Invoice_Replacement')) {
+            TGS_Viettel_Invoice_Replacement::instance($this);
         }
 
         add_filter('tgs_shop_dashboard_routes', [$this, 'register_routes']);
@@ -4643,6 +4651,274 @@ class TGS_Viettel_Invoice_Plugin
             'message' => $result['message'] ?? '',
             'success' => !empty($result['success']),
         ];
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+     * HOÁ ĐƠN THAY THẾ — song song với issue_return_adjustment() nhưng:
+     *   • request_mode = 'replacement', adjustmentType = '3'
+     *   • bản ghi mới GẮN sale_ledger_id → mọi báo cáo join MAX theo sale sẽ
+     *     hiện hoá đơn thay thế (id lớn hơn) thay cho hoá đơn gốc
+     *   • gửi CQT xong → đánh dấu hoá đơn gốc invoice_state = 'replaced'
+     * ═══════════════════════════════════════════════════════════════════════ */
+    public function issue_replacement(array $payload, array $context)
+    {
+        if (!$this->flow_service || !defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
+            return ['success' => false, 'message' => 'Plugin hoá đơn chưa sẵn sàng.'];
+        }
+
+        global $wpdb;
+        $original_id = (int) ($context['original_invoice_record_id'] ?? 0);
+        $tracking_id = (int) ($context['replacement_invoice_record_id'] ?? 0);
+        $created_by  = (int) ($context['created_by'] ?? 0);
+        $sale_id     = (int) ($context['sale_ledger_id'] ?? 0);
+        $ledger_code = sanitize_text_field($payload['local_ledger_code'] ?? '');
+        $transaction_uuid = sanitize_text_field($context['transaction_uuid'] ?? '');
+        $totals = is_array($context['totals'] ?? null) ? $context['totals'] : [];
+
+        if ($tracking_id <= 0) {
+            $wpdb->insert(TGS_TABLE_LOCAL_VIETTEL_INVOICE, [
+                'blog_id' => get_current_blog_id(),
+                'sale_ledger_id' => $sale_id,
+                'local_ledger_code' => $ledger_code,
+                'request_mode' => 'replacement',
+                'invoice_state' => 'pending',
+                'issue_status' => 0,
+                'send_cqt_status' => 0,
+                'smart_source_payload' => wp_json_encode([
+                    'source_sale_ledger_id' => $sale_id,
+                    'original_invoice_record_id' => $original_id,
+                    'reason' => (string) ($context['reason'] ?? ''),
+                ], JSON_UNESCAPED_UNICODE),
+                'request_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+                'created_by' => $created_by,
+                'created_at' => current_time('mysql'),
+                'updated_at' => current_time('mysql'),
+            ]);
+            $tracking_id = (int) $wpdb->insert_id;
+        }
+        if ($tracking_id <= 0) {
+            return ['success' => false, 'message' => 'Không tạo được bản ghi theo dõi hoá đơn thay thế.'];
+        }
+
+        // Thay thế phải dùng đúng tài khoản/MST đã phát hành hoá đơn gốc.
+        $settings = self::get_settings_for_invoice($original_id);
+        if (class_exists('TGS_Viettel_Invoice_Clusters')) {
+            TGS_Viettel_Invoice_Clusters::instance()->save_snapshot(
+                get_current_blog_id(),
+                $tracking_id,
+                $sale_id,
+                $settings
+            );
+        }
+
+        $issue_result = $this->submit_invoice_payload($payload, 'issue', [
+            'skip_persist' => true,
+            'step_name' => 'replacement_issue',
+            'invoice_record_id' => $tracking_id,
+            'transaction_uuid' => $transaction_uuid,
+            'created_by' => $created_by,
+            'sale_ledger_id' => $sale_id,
+        ]);
+
+        if (empty($issue_result['success'])) {
+            $msg = sanitize_text_field($issue_result['message'] ?? 'Lỗi phát hành hoá đơn thay thế.');
+            // Viettel: chỉ cho thay thế khi hoá đơn GỐC đã được CƠ QUAN THUẾ
+            // chấp nhận (cấp mã), không chỉ là "đã gửi CQT". Với hoá đơn vừa
+            // phát hành thì trạng thái này cần vài phút.
+            if (stripos($msg, 'VALIDATE_ADJUSTED_REPLACE_INVOICE') !== false
+                || stripos($msg, 'chưa được CQT') !== false) {
+                $msg = 'Hoá đơn gốc chưa được CƠ QUAN THUẾ chấp nhận (cấp mã) nên chưa thể thay thế. '
+                    . 'Chờ CQT xử lý xong hoá đơn gốc (thường vài phút sau khi phát hành) rồi bấm lại. '
+                    . '(Viettel: ' . $msg . ')';
+            }
+            $this->update_auto_flow_tracking($tracking_id, [
+                'request_mode' => 'replacement',
+                'invoice_state' => 'issue_error',
+                'issue_status' => 2,
+                'issue_request_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+                'issue_response_payload' => wp_json_encode($issue_result, JSON_UNESCAPED_UNICODE),
+                'issue_http_code' => (int) ($issue_result['http_code'] ?? 0),
+                'issue_error_message' => $msg,
+                'error_message' => $msg,
+                'updated_at' => current_time('mysql'),
+            ]);
+            return ['success' => false, 'invoice_record_id' => $tracking_id, 'message' => $msg];
+        }
+
+        $response = $issue_result['response'] ?? [];
+        $issued_uuid = $this->extract_transaction_uuid($response);
+        $invoice_no = sanitize_text_field($this->deep_pick($response, [
+            'result.invoiceNo', 'data.invoiceNo', 'invoiceNo', 'invoiceNumber',
+        ]));
+        $this->update_auto_flow_tracking($tracking_id, [
+            'request_mode' => 'replacement',
+            'invoice_state' => 'issued',
+            'issue_status' => 1,
+            'issue_request_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+            'issue_response_payload' => wp_json_encode($response, JSON_UNESCAPED_UNICODE),
+            'issue_http_code' => (int) ($issue_result['http_code'] ?? 0),
+            'issue_error_message' => '',
+            'issue_transaction_uuid' => $issued_uuid,
+            'viettel_invoice_no' => $invoice_no,
+            'issue_sent_at' => current_time('mysql'),
+            'total_before_tax' => (float) ($totals['total_before_tax'] ?? 0),
+            'total_tax_amount' => (float) ($totals['total_tax'] ?? 0),
+            'total_after_tax' => (float) ($totals['total_after_tax'] ?? 0),
+            'template_code' => sanitize_text_field($payload['generalInvoiceInfo']['templateCode'] ?? ''),
+            'invoice_series' => sanitize_text_field($payload['generalInvoiceInfo']['invoiceSeries'] ?? ''),
+            'buyer_name' => sanitize_text_field($payload['buyerInfo']['buyerName'] ?? ''),
+            'buyer_tax_code' => sanitize_text_field($payload['buyerInfo']['buyerTaxCode'] ?? ''),
+            'error_message' => '',
+            'updated_at' => current_time('mysql'),
+        ]);
+
+        if ($issued_uuid === '') {
+            $msg = 'Hoá đơn thay thế đã phát hành nhưng không lấy được transactionUuid để gửi CQT.';
+            $this->update_auto_flow_tracking($tracking_id, [
+                'invoice_state' => 'cqt_error',
+                'send_cqt_status' => 2,
+                'cqt_error_message' => $msg,
+                'error_message' => $msg,
+                'updated_at' => current_time('mysql'),
+            ]);
+            return ['success' => false, 'invoice_record_id' => $tracking_id, 'invoice_no' => $invoice_no, 'message' => $msg];
+        }
+
+        $cqt = $this->send_replacement_cqt($tracking_id, $issued_uuid, $ledger_code, $created_by, $invoice_no);
+        if (!empty($cqt['success'])) {
+            $this->mark_invoice_replaced($original_id, $tracking_id, $invoice_no);
+        }
+        return $cqt;
+    }
+
+    private function send_replacement_cqt($tracking_id, $transaction_uuid, $ledger_code, $created_by, $invoice_no = '')
+    {
+        $settings = self::get_settings_for_invoice($tracking_id);
+        $payload_result = $this->flow_service->build_send_cqt_payload(
+            sanitize_text_field($settings['supplier_tax_code'] ?? ''),
+            $transaction_uuid
+        );
+        if (empty($payload_result['success'])) {
+            return ['success' => false, 'invoice_record_id' => $tracking_id, 'invoice_no' => $invoice_no, 'message' => $payload_result['message'] ?? 'Không dựng được payload gửi CQT.'];
+        }
+
+        $cqt_payload = $payload_result['payload'];
+        $cqt_payload['local_ledger_code'] = $ledger_code;
+        $cqt_result = $this->submit_invoice_payload($cqt_payload, 'send_cqt', [
+            'skip_persist' => true,
+            'step_name' => 'replacement_send_cqt',
+            'invoice_record_id' => $tracking_id,
+            'transaction_uuid' => $transaction_uuid,
+            'created_by' => $created_by,
+            'sale_ledger_id' => 0,
+        ]);
+
+        if (empty($cqt_result['success'])) {
+            $msg = sanitize_text_field($cqt_result['message'] ?? 'Lỗi gửi hoá đơn thay thế lên CQT.');
+            $this->update_auto_flow_tracking($tracking_id, [
+                'invoice_state' => 'cqt_error',
+                'send_cqt_status' => 2,
+                'cqt_request_payload' => wp_json_encode($cqt_payload, JSON_UNESCAPED_UNICODE),
+                'cqt_response_payload' => wp_json_encode($cqt_result, JSON_UNESCAPED_UNICODE),
+                'cqt_http_code' => (int) ($cqt_result['http_code'] ?? 0),
+                'cqt_error_message' => $msg,
+                'error_message' => $msg,
+                'updated_at' => current_time('mysql'),
+            ]);
+            return ['success' => false, 'invoice_record_id' => $tracking_id, 'invoice_no' => $invoice_no, 'message' => $msg];
+        }
+
+        $this->update_auto_flow_tracking($tracking_id, [
+            'invoice_state' => 'done',
+            'send_cqt_status' => 1,
+            'cqt_request_payload' => wp_json_encode($cqt_payload, JSON_UNESCAPED_UNICODE),
+            'cqt_response_payload' => wp_json_encode($cqt_result['response'] ?? $cqt_result, JSON_UNESCAPED_UNICODE),
+            'cqt_http_code' => (int) ($cqt_result['http_code'] ?? 0),
+            'cqt_error_message' => '',
+            'error_message' => '',
+            'cqt_sent_at' => current_time('mysql'),
+            'updated_at' => current_time('mysql'),
+        ]);
+
+        return [
+            'success' => true,
+            'invoice_record_id' => $tracking_id,
+            'invoice_no' => $invoice_no,
+            'transaction_uuid' => $transaction_uuid,
+            'message' => 'Đã phát hành hoá đơn thay thế và gửi CQT thành công.',
+        ];
+    }
+
+    /** Chỉ gửi lại CQT cho hoá đơn thay thế đã issue; không phát hành bản mới. */
+    public function retry_replacement_cqt($tracking_id)
+    {
+        if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
+            return ['status' => 'error', 'success' => false, 'message' => 'Thiếu bảng hoá đơn.'];
+        }
+        global $wpdb;
+        $row = $wpdb->get_row($wpdb->prepare(
+            'SELECT * FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . ' WHERE local_viettel_invoice_id = %d AND request_mode = %s LIMIT 1',
+            (int) $tracking_id,
+            'replacement'
+        ), ARRAY_A);
+        if (empty($row) || (int) ($row['issue_status'] ?? 0) !== 1) {
+            return ['status' => 'error', 'success' => false, 'message' => 'Hoá đơn thay thế chưa phát hành thành công.'];
+        }
+
+        $result = $this->send_replacement_cqt(
+            (int) $tracking_id,
+            sanitize_text_field($row['issue_transaction_uuid'] ?? ''),
+            sanitize_text_field($row['local_ledger_code'] ?? ''),
+            get_current_user_id(),
+            sanitize_text_field($row['viettel_invoice_no'] ?? '')
+        );
+        if (!empty($result['success'])) {
+            $src = json_decode((string) ($row['smart_source_payload'] ?? ''), true);
+            $this->mark_invoice_replaced(
+                (int) ($src['original_invoice_record_id'] ?? 0),
+                (int) $tracking_id,
+                sanitize_text_field($row['viettel_invoice_no'] ?? '')
+            );
+        }
+        return [
+            'success' => !empty($result['success']),
+            'status' => !empty($result['success']) ? 'done' : 'error',
+            'invoice_record_id' => (int) $tracking_id,
+            'invoice_no' => sanitize_text_field($result['invoice_no'] ?? ''),
+            'message' => $result['message'] ?? '',
+        ];
+    }
+
+    /** Đánh dấu hoá đơn gốc đã bị thay thế (không xoá — giữ lại để đối chiếu). */
+    private function mark_invoice_replaced($original_record_id, $replacement_record_id, $replacement_no)
+    {
+        $original_record_id = (int) $original_record_id;
+        if ($original_record_id <= 0 || !defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
+            return;
+        }
+        global $wpdb;
+        $row = $wpdb->get_row($wpdb->prepare(
+            'SELECT issue_response_payload FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . ' WHERE local_viettel_invoice_id = %d LIMIT 1',
+            $original_record_id
+        ), ARRAY_A);
+        $payload = json_decode((string) ($row['issue_response_payload'] ?? ''), true);
+        if (!is_array($payload)) {
+            $payload = [];
+        }
+        $payload['replaced_by'] = [
+            'record_id' => (int) $replacement_record_id,
+            'invoice_no' => (string) $replacement_no,
+            'at' => current_time('mysql'),
+        ];
+        $wpdb->update(
+            TGS_TABLE_LOCAL_VIETTEL_INVOICE,
+            [
+                'invoice_state' => 'replaced',
+                'issue_response_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+                'updated_at' => current_time('mysql'),
+            ],
+            ['local_viettel_invoice_id' => $original_record_id]
+        );
     }
 
     public function get_create_view_data()

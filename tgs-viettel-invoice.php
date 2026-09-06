@@ -1810,12 +1810,17 @@ class TGS_Viettel_Invoice_Plugin
                     ? ', i.' . $unit_col
                     : ', NULL AS ' . $unit_col;
             }
+            // Cờ "quà sữa <24m" — để màn review gắn nhãn "QUÀ SỮA <24TH" cho dòng
+            // bill Z (hệ thống tự tách theo luật <24m, không phải mã Z).
+            $danger_col_sql = $this->flow_service->local_ledger_item_column_exists('local_ledger_item_is_under24_promo_danger')
+                ? ', i.local_ledger_item_is_under24_promo_danger'
+                : ', 0 AS local_ledger_item_is_under24_promo_danger';
             $placeholders = implode(',', array_fill(0, count($item_ids), '%d'));
 
             $rows = $wpdb->get_results(
                 $wpdb->prepare(
                     'SELECT i.local_ledger_item_id, i.local_product_name_id, i.quantity, i.price,
-                            i.local_ledger_item_gift_type' . $sku_sql . $unit_cols_sql . '
+                            i.local_ledger_item_gift_type' . $sku_sql . $unit_cols_sql . $danger_col_sql . '
                      FROM ' . TGS_TABLE_LOCAL_LEDGER_ITEM . ' i
                      WHERE i.local_ledger_item_id IN (' . $placeholders . ')
                      ORDER BY i.local_ledger_item_id ASC',
@@ -1841,15 +1846,14 @@ class TGS_Viettel_Invoice_Plugin
                     'is_gift'   => intval($row['local_ledger_item_gift_type'] ?? 0) === 1,
                     /*
                      * Dòng này do HỆ THỐNG tự tách hay do NHÂN VIÊN chuyển tay?
-                     *
-                     * Xét bằng chính SKU, không phải bằng chuyện nó đang nằm ở
-                     * bill Z: bill Z chứa cả hai loại. Chỉ mã đuôi Z mới bị khoá
-                     * không cho đưa lại bill chính (xem
-                     * TGS_POS_Promo_Split_Service::item_is_auto_split).
+                     * Hệ thống tự tách = mã đuôi Z HOẶC quà sữa <24m
+                     * (is_under24_promo_danger). Cả hai đều KHÔNG kéo lại bill
+                     * chính ở màn review (một chiều) — cờ này chỉ để gắn nhãn.
                      */
                     'is_sku_ends_z' => TGS_Viettel_Invoice_Flow_Service::is_promo_split_sku(
                         (string) ($row['local_product_sku'] ?? '')
                     ),
+                    'is_under24_promo_danger' => intval($row['local_ledger_item_is_under24_promo_danger'] ?? 0) === 1,
                 ];
             }
         }

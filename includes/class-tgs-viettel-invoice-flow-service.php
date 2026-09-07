@@ -1053,12 +1053,19 @@ class TGS_Viettel_Invoice_Flow_Service
                 ? max(0.0, $line_amount / $sale_qty)
                 : max(0.0, (float) $line['don_gia_gui_thue']);
 
+            $gift_meta = $this->extract_gift_meta($item['local_ledger_item_meta'] ?? '');
             $source_items[] = [
                 'ledger_item_id' => intval($item['local_ledger_item_id']),
                 'product_id' => intval($item['local_product_name_id']),
                 'is_gift' => intval($item['local_ledger_item_gift_type'] ?? 0) === 1,
                 'is_under24_promo_danger' => intval($item['local_ledger_item_is_under24_promo_danger'] ?? 0) === 1,
-                'gift_parent_sku' => $this->extract_gift_parent_sku($item['local_ledger_item_meta'] ?? ''),
+                'gift_scope' => (string) ($gift_meta['gift_scope'] ?? ''),
+                'gift_parent_cart_key' => (string) ($gift_meta['gift_parent_cart_key'] ?? ''),
+                'gift_parent_product_id' => intval($gift_meta['gift_parent_product_id'] ?? 0),
+                'gift_parent_sku' => (string) ($gift_meta['gift_parent_sku'] ?? ''),
+                'gift_parent_resolution' => (string) ($gift_meta['gift_parent_resolution'] ?? ''),
+                'promotion_id' => (string) ($gift_meta['promotion_id'] ?? ''),
+                'promotion_type' => (string) ($gift_meta['promotion_type'] ?? ''),
                 'sku' => (string) ($item['local_product_sku'] ?? ''),
                 'item_name' => (string) ($item['local_product_name'] ?? ''),
                 'unit_name' => $unit_name,
@@ -1161,6 +1168,7 @@ class TGS_Viettel_Invoice_Flow_Service
         $main_under24 = [];
         $gift_items = [];
         $under24_main_skus = [];
+        $under24_main_product_ids = [];
 
         /*
          * ═══════════════════════════════════════════════════════════════════
@@ -1231,6 +1239,10 @@ class TGS_Viettel_Invoice_Flow_Service
                 if ($sku !== '') {
                     $under24_main_skus[$sku] = true;
                 }
+                $product_id = intval($item['product_id'] ?? 0);
+                if ($product_id > 0) {
+                    $under24_main_product_ids[$product_id] = true;
+                }
             } else {
                 $main_normal[] = $item;
             }
@@ -1240,20 +1252,34 @@ class TGS_Viettel_Invoice_Flow_Service
         foreach ($gift_items as $gift_item) {
             $gift_sku = (string) ($gift_item['sku'] ?? '');
             $parent_sku = trim((string) ($gift_item['gift_parent_sku'] ?? ''));
+            $parent_product_id = intval($gift_item['gift_parent_product_id'] ?? 0);
 
-            // User đã bỏ tích loại trừ (is_under24_promo_danger = false) → tôn trọng, cho gửi.
-            $user_override = isset($gift_item['is_under24_promo_danger']) && empty($gift_item['is_under24_promo_danger']);
+            $gift_scope = strtolower(trim((string) ($gift_item['gift_scope'] ?? '')));
+            $parent_resolution = strtolower(trim((string) ($gift_item['gift_parent_resolution'] ?? '')));
+            $is_order_gift = $gift_scope === 'order' || $parent_resolution === 'order';
+            $is_line_gift = $gift_scope === 'line';
+            $is_legacy_gift = !$is_order_gift && !$is_line_gift;
+            $has_resolved_parent = in_array($parent_resolution, [
+                'source_cart_key',
+                'parent_product_id',
+                'buy_sku',
+            ], true);
 
-            if (!$user_override) {
-                // Bỏ quà tặng nếu xác định đi theo hàng chính dưới 24 tháng.
-                if ($parent_sku !== '' && isset($under24_lookup[$parent_sku])) {
-                    continue;
-                }
+            /*
+             * Quà order-level (quà chờ kế toán duyệt / quà theo giá trị đơn)
+             * không có parent line, vì vậy TUYỆT ĐỐI không dùng
+             * has_under24_main để loại toàn bộ quà. Chỉ line gift có parent
+             * dưới 24m mới bị loại tự động.
+             */
+            $parent_is_under24 = ($parent_sku !== '' && isset($under24_lookup[$parent_sku]))
+                || ($parent_product_id > 0 && isset($under24_main_product_ids[$parent_product_id]));
+            if ($is_line_gift && $has_resolved_parent && $parent_is_under24) {
+                continue;
+            }
 
-                // Trường hợp không có parent rõ ràng: quà có SKU dưới 24m cũng loại bỏ.
-                if ($gift_sku !== '' && isset($under24_lookup[$gift_sku])) {
-                    continue;
-                }
+            // Đơn cũ chưa có gift_scope: giữ fallback theo SKU quà để không để lọt dữ liệu cũ.
+            if ($is_legacy_gift && $gift_sku !== '' && isset($under24_lookup[$gift_sku])) {
+                continue;
             }
 
             $filtered_gifts[] = $gift_item;
@@ -1309,6 +1335,7 @@ class TGS_Viettel_Invoice_Flow_Service
                 'customer' => isset($source_payload['customer']) && is_array($source_payload['customer']) ? $source_payload['customer'] : [],
                 'contains_under24_main_item' => !empty($under24_main_skus) ? 1 : 0,
                 'under24_main_sku_list' => array_keys($under24_main_skus),
+                'under24_main_product_ids' => array_keys($under24_main_product_ids),
                 'items' => $sorted_items,
             ],
         ];
@@ -1616,18 +1643,20 @@ class TGS_Viettel_Invoice_Flow_Service
         ];
     }
 
-    private function extract_gift_parent_sku($meta_json)
+    private function extract_gift_meta($meta_json)
     {
         if (!is_string($meta_json) || trim($meta_json) === '') {
-            return '';
+            return [];
         }
 
         $decoded = json_decode($meta_json, true);
         if (!is_array($decoded)) {
-            return '';
+            return [];
         }
 
+        $parent_sku = '';
         $possible_keys = [
+            'gift_parent_sku',
             'parent_sku',
             'main_sku',
             'gift_for_sku',
@@ -1637,11 +1666,27 @@ class TGS_Viettel_Invoice_Flow_Service
 
         foreach ($possible_keys as $key) {
             if (!empty($decoded[$key]) && is_string($decoded[$key])) {
-                return trim($decoded[$key]);
+                $parent_sku = trim($decoded[$key]);
+                break;
             }
         }
 
-        return '';
+        return [
+            'gift_scope' => strtolower(trim((string) ($decoded['gift_scope'] ?? ''))),
+            'gift_parent_cart_key' => trim((string) ($decoded['gift_parent_cart_key'] ?? $decoded['parent_cart_key'] ?? '')),
+            'gift_parent_product_id' => intval($decoded['gift_parent_product_id'] ?? $decoded['parent_product_id'] ?? 0),
+            'gift_parent_sku' => $parent_sku,
+            'gift_parent_resolution' => strtolower(trim((string) ($decoded['gift_parent_resolution'] ?? $decoded['parent_resolution'] ?? ''))),
+            'promotion_id' => (string) ($decoded['promotion_id'] ?? ''),
+            'promotion_type' => (string) ($decoded['promotion_type'] ?? ''),
+            'gift_tax_override' => strtolower(trim((string) ($decoded['gift_tax_override'] ?? ''))),
+        ];
+    }
+
+    private function extract_gift_parent_sku($meta_json)
+    {
+        $meta = $this->extract_gift_meta($meta_json);
+        return (string) ($meta['gift_parent_sku'] ?? '');
     }
 
     /*

@@ -1735,6 +1735,47 @@ class TGS_Viettel_Invoice_Flow_Service
         $buyer_name_is_placeholder = self::is_placeholder_buyer_name($customer['customer_name'] ?? '');
 
         /*
+         * ─── CÓ MÃ SỐ THUẾ THÌ KHÔNG ĐƯỢC RA "BÁN CHO NGƯỜI TIÊU DÙNG" ──────
+         *
+         * Hai dòng buyerName / buyerLegalName xét bằng hai luật khác nhau, nên
+         * đơn có mã số thuế mà ô tên còn để nhãn nội bộ ("Khách lẻ") sẽ ra một
+         * tờ hoá đơn tự mâu thuẫn:
+         *
+         *   Họ tên người mua : Bán cho người tiêu dùng
+         *   Tên đơn vị       : CÔNG TY CỔ PHẦN ...
+         *   Mã số thuế       : 0106933743
+         *
+         * Bán cho đơn vị thì phải có tên người mua hàng cụ thể. Kế toán chốt
+         * luật này (09/2026).
+         *
+         * ── VÌ SAO CHẶN Ở ĐÂY CHỨ KHÔNG CHỈ Ở GIAO DIỆN ────────────────────
+         *
+         * Màn POS đã chặn (pos-tax-lookup.js → taxBuyerRequirement), nhưng
+         * hoá đơn còn được phát hành từ những đường KHÔNG đi qua màn đó: gửi
+         * lại từ báo cáo VAT, luồng tự động, đơn cũ tồn trong hàng đợi. Phát
+         * hành sai rồi thì không thu hồi được, phải lập hoá đơn thay thế — nên
+         * thà chặn ở chỗ duy nhất mọi đường đều đi qua.
+         *
+         * Chặn trả về lỗi có nội dung rõ, cả hai chỗ gọi đều hiện lại được cho
+         * người dùng (wp_send_json_error / invoice_state = validate_error), và
+         * sửa được ngay ở ô Tên khách hàng rồi gửi lại.
+         */
+        $buyer_tax_code = trim((string) ($customer['customer_tax_code'] ?? ''));
+        if ($buyer_tax_code !== '' && $buyer_name_is_placeholder) {
+            $current_name = trim((string) ($customer['customer_name'] ?? ''));
+
+            return [
+                'success' => false,
+                'message' => 'Đơn có mã số thuế ' . $buyer_tax_code . ' nhưng '
+                    . ($current_name === ''
+                        ? 'chưa khai tên người mua hàng'
+                        : 'ô Tên khách hàng đang để "' . $current_name . '"')
+                    . '. Hoá đơn bán cho đơn vị không được ghi "' . $retail_buyer_label
+                    . '" ở dòng Họ tên người mua — nhập tên người mua cụ thể rồi gửi lại.',
+            ];
+        }
+
+        /*
          * Mã chứng từ = mã phiếu bán bên mình (`local_ledger_code` của bảng
          * wp_local_ledger, chính con số quầy đọc trên bill, ví dụ
          * CNTESTAA10008). Đơn tách bill khuyến mãi thì mỗi phiếu con mang mã

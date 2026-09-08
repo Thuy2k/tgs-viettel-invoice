@@ -362,17 +362,29 @@ class TGS_Viettel_Invoice_Replacement
             }
         }
 
-        $totals = [
-            'total_before_tax' => (float) ($issue_payload['summarizeInfo']['totalAmountWithoutTax'] ?? 0),
-            'total_tax' => (float) ($issue_payload['summarizeInfo']['totalTaxAmount'] ?? 0),
-            'total_after_tax' => (float) ($issue_payload['summarizeInfo']['totalAmountWithTax'] ?? 0),
-        ];
-
         $payload = $issue_payload;
         $payload['local_ledger_code'] = (string) ($original['local_ledger_code'] ?? '');
         $payload['generalInvoiceInfo'] = $general;
         $payload['buyerInfo'] = $buyer;
-        // itemInfo / taxBreakdowns / summarizeInfo / payments / metadata: GIỮ NGUYÊN của hoá đơn gốc.
+        // itemInfo / payments / metadata: GIỮ NGUYÊN của hoá đơn gốc — đơn giá,
+        // số lượng, mã hàng của bản thay thế phải đúng bằng hoá đơn gốc.
+
+        /*
+         * Riêng HAI CỘT TIỀN của dòng thì làm tròn lại về đồng: hoá đơn gốc
+         * phát hành trước 08/09/2026 còn mang thập phân ở Thành tiền trước
+         * thuế và Tiền thuế, chép thẳng sang là bản thay thế cũng lẻ y hệt.
+         * Tổng tiền thanh toán không đổi — xem
+         * TGS_Viettel_Invoice_Flow_Service::normalize_copied_invoice_money().
+         */
+        if (class_exists('TGS_Viettel_Invoice_Flow_Service')) {
+            $payload = TGS_Viettel_Invoice_Flow_Service::normalize_copied_invoice_money($payload);
+        }
+
+        $totals = [
+            'total_before_tax' => (float) ($payload['summarizeInfo']['totalAmountWithoutTax'] ?? 0),
+            'total_tax' => (float) ($payload['summarizeInfo']['totalTaxAmount'] ?? 0),
+            'total_after_tax' => (float) ($payload['summarizeInfo']['totalAmountWithTax'] ?? 0),
+        ];
 
         return [
             'success' => true,

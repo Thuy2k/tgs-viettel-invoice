@@ -524,6 +524,12 @@ class TGS_Viettel_Invoice_Flow_Service
      * tức là 87.962,96 × 5 = 439.814,80 nhưng THÀNH TIỀN vẫn khai tròn đồng
      * 439.815 — chênh lệch dưới nửa đồng do làm tròn, Viettel chấp nhận.
      *
+     * ✅ ĐÃ KIỂM CHỨNG TRÊN API THẬT (08/09/2026): phát hành thử thành công,
+     * không còn bị IVI_TOTAL_A_WITHOUT_TAX_AND_UP_QUAN_NOT_COMPARED. Tức là
+     * Viettel đối chiếu ở mức ĐỒNG chứ không đòi tích khớp tuyệt đối — đừng
+     * dựng lại cơ chế nắn đơn giá cho tích tròn nữa (xem
+     * nan_don_gia_cho_tron_dong(), giờ chỉ còn dùng khi L > 0).
+     *
      * Đổi hằng số này về 2 là quay lại đúng cách làm cũ (tiền dòng mang phần
      * lẻ theo đơn giá) cho cả hoá đơn gốc, hoá đơn điều chỉnh, hoá đơn thay
      * thế và hai bản xem trước bên POS — một chỗ duy nhất.

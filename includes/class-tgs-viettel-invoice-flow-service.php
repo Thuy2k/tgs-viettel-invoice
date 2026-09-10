@@ -505,6 +505,25 @@ class TGS_Viettel_Invoice_Flow_Service
     }
 
     /**
+     * Số chữ số thập phân của các khoản tiền theo dòng trên hóa đơn.
+     *
+     * Đơn giá và tiền dòng là hai quy tắc khác nhau: đơn giá có thể có phần
+     * lẻ theo cấu hình Viettel, còn thành tiền/tiền thuế mặc định chốt theo
+     * đồng. Preview ở POS và payload gửi đi cùng đọc một giá trị này.
+     */
+    const LINE_AMOUNT_DECIMALS = 0;
+
+    public static function line_amount_decimals()
+    {
+        $decimals = (int) apply_filters(
+            'tgs_viettel_invoice_line_amount_decimals',
+            self::LINE_AMOUNT_DECIMALS
+        );
+
+        return max(0, min(4, $decimals));
+    }
+
+    /**
      * Đơn giá đã cắt về đúng số chữ số thập phân Viettel cho phép.
      *
      * round() trước cho ra cách làm tròn nhất quán (0,5 lên trên), rồi sprintf
@@ -655,9 +674,9 @@ class TGS_Viettel_Invoice_Flow_Service
     public static function api_line_amounts($quantity, $unit_price, $with_tax, $tax_percent)
     {
         $quantity = max(0.0, (float) $quantity);
-        $decimals = self::unit_price_decimals();
+        $line_decimals = self::line_amount_decimals();
         // $with_tax là số khách ĐÃ TRẢ (chốt ở lúc bán) — luôn tròn đồng,
-        // không phụ thuộc $decimals của đơn giá gửi Viettel.
+        // không phụ thuộc số chữ số của đơn giá gửi Viettel.
         $with_tax = max(0, (int) round($with_tax));
 
         /*
@@ -670,7 +689,7 @@ class TGS_Viettel_Invoice_Flow_Service
          */
         if ((float) $tax_percent <= 0) {
             $api_price   = self::nan_don_gia_cho_tron_dong(self::api_unit_price($unit_price, true), $quantity, true);
-            $without_tax = max(0, round($api_price * $quantity, $decimals));
+            $without_tax = max(0, round($api_price * $quantity, $line_decimals));
 
             return [
                 'unit_price'  => $api_price,
@@ -682,9 +701,9 @@ class TGS_Viettel_Invoice_Flow_Service
 
         $api_price   = self::nan_don_gia_cho_tron_dong(self::api_unit_price($unit_price), $quantity);
         // KHÔNG ép (int): unitPrice × quantity giờ được phép có phần lẻ tới
-        // $decimals chữ số — đây chính là chỗ trước kia dồn hết phần lẻ vào
+        // số chữ số của tiền dòng — đây chính là chỗ trước kia dồn hết phần lẻ vào
         // tiền thuế vì withoutTax bị ép nguyên.
-        $without_tax = max(0, round($api_price * $quantity, $decimals));
+        $without_tax = max(0, round($api_price * $quantity, $line_decimals));
 
         // Chặn tiền thuế âm nếu đơn giá làm tròn lên vượt cả số đã thu.
         $with_tax = max($with_tax, $without_tax);
@@ -693,7 +712,7 @@ class TGS_Viettel_Invoice_Flow_Service
             'unit_price'  => $api_price,
             'without_tax' => $without_tax,
             'with_tax'    => $with_tax,
-            'tax_amount'  => round($with_tax - $without_tax, $decimals),
+            'tax_amount'  => round($with_tax - $without_tax, $line_decimals),
         ];
     }
 
@@ -1267,13 +1286,18 @@ class TGS_Viettel_Invoice_Flow_Service
 
             /*
              * Quà order-level (quà chờ kế toán duyệt / quà theo giá trị đơn)
-             * không có parent line, vì vậy TUYỆT ĐỐI không dùng
-             * has_under24_main để loại toàn bộ quà. Chỉ line gift có parent
-             * dưới 24m mới bị loại tự động.
+             * không có parent line. Tuy nhiên, nếu bill có ít nhất một hàng
+             * chính đặc biệt dưới 24 tháng thì quà-bill cũng không được đưa
+             * lên payload thuế. Bill chỉ có hàng bình thường vẫn giữ nguyên
+             * quà-bill để khai bình thường.
              */
             $parent_is_under24 = ($parent_sku !== '' && isset($under24_lookup[$parent_sku]))
                 || ($parent_product_id > 0 && isset($under24_main_product_ids[$parent_product_id]));
             if ($is_line_gift && $has_resolved_parent && $parent_is_under24) {
+                continue;
+            }
+
+            if ($is_order_gift && !empty($under24_main_skus)) {
                 continue;
             }
 

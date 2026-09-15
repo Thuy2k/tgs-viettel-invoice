@@ -438,7 +438,8 @@ class TGS_Viettel_Invoice_Flow_Service
     /**
      * ĐVT NHỎ NHẤT (ĐVCB) cho HOÁ ĐƠN THUẾ — kế toán yêu cầu hoá đơn VAT khai theo đơn vị cơ bản
      * (bán 1 Vỉ_4 → khai 4 Hộp), khác với bill bán cho khách (giữ ĐVT bán). Số lượng = cột `quantity`
-     * (đã theo ĐVCB); tên ĐVT = danh mục (`local_product_unit`), thiếu thì lấy tên đã lưu lúc bán.
+     * (đã theo ĐVCB); tên ĐVT ưu tiên `base_unit` của BẢNG GIÁ (ĐVT ratio-1 chuẩn), thiếu thì mới lấy
+     * danh mục (`local_product_unit`) / tên đã lưu lúc bán — vì DONVI HTsoft có thể là ĐVT BÁN.
      * ratio = 1 (để phiếu điều chỉnh/hoàn quy theo cùng ĐVCB). Đơn giá KHÔNG tính ở đây — builder
      * chia thẳng tiền hàng cho ĐVCB (SL × đơn giá luôn khớp tiền hàng, không nhân tỷ lệ rồi làm tròn).
      *
@@ -456,8 +457,28 @@ class TGS_Viettel_Invoice_Flow_Service
                 $stored_unit = trim((string) ($meta['unit_name'] ?? $meta['unit'] ?? ''));
             }
         }
+
+        $unit_name = $catalog_unit !== '' ? $catalog_unit : $stored_unit;
+
+        /*
+         * TÊN ĐVT nhỏ nhất CHUẨN = ĐVT ratio-1 của BẢNG GIÁ (base_unit). Ưu tiên nguồn
+         * này vì `local_product_unit` (DONVI của HTsoft) CÓ THỂ chính là ĐVT BÁN khi
+         * HTsoft khai trùng tên (vd DONVI="Lốc" nhưng ĐVT nhỏ nhất thật là "Hộp"). Số
+         * lượng + đơn giá đã theo ĐVCB rồi; chỗ này chỉ nắn đúng TÊN để hoá đơn thuế
+         * khai đúng đơn vị. Không có bảng giá / mã lạ -> giữ tên danh mục như cũ.
+         */
+        $sku = trim((string) ($row['local_product_sku'] ?? ($row['sku'] ?? '')));
+        if ($sku !== '' && class_exists('TGS_POS_Price_List')
+            && method_exists('TGS_POS_Price_List', 'pricing_for_sku')) {
+            $pl = TGS_POS_Price_List::pricing_for_sku($sku);
+            $base = trim((string) ($pl['base_unit'] ?? ''));
+            if ($base !== '') {
+                $unit_name = $base;
+            }
+        }
+
         return [
-            'unit_name' => $catalog_unit !== '' ? $catalog_unit : $stored_unit,
+            'unit_name' => $unit_name,
             'quantity'  => $base_qty,
             'ratio'     => 1.0,
         ];

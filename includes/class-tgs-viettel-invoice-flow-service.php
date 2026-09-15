@@ -7,6 +7,28 @@ if (!defined('ABSPATH')) {
 class TGS_Viettel_Invoice_Flow_Service
 {
     /**
+     * GATE KHÓA SỔ cho luồng gửi thuế eVAT (per-website). Phiếu (bán/hoàn) tạo
+     * TRƯỚC-hoặc-BẰNG mốc khóa sổ của shop -> KHÔNG được gửi/đẩy lại/điều chỉnh
+     * eVAT nữa (đang chốt dữ liệu cũ để đồng bộ HTsoft). Đọc created_at của phiếu
+     * theo local_ledger_id rồi hỏi TGS_Book_Close (plugin tgs_shop_management).
+     * Trả '' nếu ĐƯỢC PHÉP; trả LỜI NHẮN sạch (không lộ SQL) nếu bị khóa. Class
+     * chưa nạp / không rõ giờ tạo -> cho qua (''). Phiếu tạo SAU mốc -> '' bình thường.
+     */
+    public static function book_close_block($ledger_id)
+    {
+        $ledger_id = intval($ledger_id);
+        if (!class_exists('TGS_Book_Close') || $ledger_id <= 0 || !defined('TGS_TABLE_LOCAL_LEDGER')) {
+            return '';
+        }
+        global $wpdb;
+        $created = (string) $wpdb->get_var($wpdb->prepare(
+            'SELECT created_at FROM ' . TGS_TABLE_LOCAL_LEDGER . ' WHERE local_ledger_id = %d LIMIT 1',
+            $ledger_id
+        ));
+        return TGS_Book_Close::is_locked($created) ? TGS_Book_Close::locked_message() : '';
+    }
+
+    /**
      * Thuế suất của một dòng — KHÔNG có giá trị mặc định.
      *
      * ── VÌ SAO KHÔNG ĐOÁN ───────────────────────────────────────────────────

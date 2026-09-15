@@ -449,6 +449,13 @@ class TGS_Viettel_Invoice_Return_Adjustment
             ];
         }
 
+        // KHÓA SỔ: phiếu hoàn tạo trước-hoặc-bằng mốc khóa sổ -> KHÔNG cho gửi/gửi lại
+        // eVAT điều chỉnh giảm (hoàn). Chốt dữ liệu cũ để đồng bộ HTsoft.
+        if (class_exists('TGS_Viettel_Invoice_Flow_Service')
+            && ($blk = TGS_Viettel_Invoice_Flow_Service::book_close_block(intval($queue['return_ledger_id'] ?? 0)))) {
+            return ['id' => intval($queue_id), 'status' => 'book_closed', 'book_closed' => true, 'message' => $blk];
+        }
+
         /*
          * Chặn lại cả ở đây, không chỉ lúc phiếu hoàn vừa lập: nút "gửi lại" ở
          * màn Gửi thuế gọi thẳng vào process(). Bill Z không đi thuế nên bấm

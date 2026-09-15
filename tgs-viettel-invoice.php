@@ -3978,6 +3978,12 @@ class TGS_Viettel_Invoice_Plugin
             return ['success' => false, 'step' => 'validate', 'message' => 'Thiếu mã đơn bán để gửi hóa đơn.'];
         }
 
+        // KHÓA SỔ: đơn tạo trước-hoặc-bằng mốc khóa sổ -> KHÔNG cho gửi/đẩy lại eVAT.
+        if (class_exists('TGS_Viettel_Invoice_Flow_Service')
+            && ($blk = TGS_Viettel_Invoice_Flow_Service::book_close_block($sale_ledger_id))) {
+            return ['success' => false, 'step' => 'book_closed', 'book_closed' => true, 'message' => $blk];
+        }
+
         // Bill chính rỗng = đơn xử lý nội bộ, không phát hành và không phải lỗi.
         if (!$this->sale_has_taxable_lines($sale_ledger_id)) {
             return [

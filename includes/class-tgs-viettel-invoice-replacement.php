@@ -203,6 +203,11 @@ class TGS_Viettel_Invoice_Replacement
                 'message' => 'Hoá đơn thay thế đã phát hành + gửi CQT trước đó.',
             ];
         }
+        // KHÓA SỔ: đơn bán tạo trước-hoặc-bằng mốc khóa sổ -> KHÔNG cho thay thế hóa đơn.
+        if (class_exists('TGS_Viettel_Invoice_Flow_Service')
+            && ($blk = TGS_Viettel_Invoice_Flow_Service::book_close_block((int) ($queue['sale_ledger_id'] ?? 0)))) {
+            return ['success' => false, 'status' => 'book_closed', 'book_closed' => true, 'id' => (int) $queue_id, 'message' => $blk];
+        }
         if (!self::is_enabled()) {
             return ['success' => false, 'status' => 'disabled', 'message' => 'Chức năng thay thế đang tắt.'];
         }

@@ -436,6 +436,34 @@ class TGS_Viettel_Invoice_Flow_Service
     }
 
     /**
+     * ĐVT NHỎ NHẤT (ĐVCB) cho HOÁ ĐƠN THUẾ — kế toán yêu cầu hoá đơn VAT khai theo đơn vị cơ bản
+     * (bán 1 Vỉ_4 → khai 4 Hộp), khác với bill bán cho khách (giữ ĐVT bán). Số lượng = cột `quantity`
+     * (đã theo ĐVCB); tên ĐVT = danh mục (`local_product_unit`), thiếu thì lấy tên đã lưu lúc bán.
+     * ratio = 1 (để phiếu điều chỉnh/hoàn quy theo cùng ĐVCB). Đơn giá KHÔNG tính ở đây — builder
+     * chia thẳng tiền hàng cho ĐVCB (SL × đơn giá luôn khớp tiền hàng, không nhân tỷ lệ rồi làm tròn).
+     *
+     * @return array ['unit_name' => string, 'quantity' => float, 'ratio' => float(1)]
+     */
+    public static function base_unit_view(array $row): array
+    {
+        $base_qty     = max(0.0, floatval($row['quantity'] ?? 0));
+        $catalog_unit = trim((string) ($row['local_product_unit'] ?? ''));
+        $stored_unit  = trim((string) ($row['local_ledger_item_unit_name'] ?? ''));
+        if ($stored_unit === '') {
+            $meta = $row['local_ledger_item_meta'] ?? '';
+            $meta = is_string($meta) ? json_decode($meta, true) : (is_array($meta) ? $meta : []);
+            if (is_array($meta)) {
+                $stored_unit = trim((string) ($meta['unit_name'] ?? $meta['unit'] ?? ''));
+            }
+        }
+        return [
+            'unit_name' => $catalog_unit !== '' ? $catalog_unit : $stored_unit,
+            'quantity'  => $base_qty,
+            'ratio'     => 1.0,
+        ];
+    }
+
+    /**
      * Mã phiếu này có phải phiếu tách hàng khuyến mãi (mã Z) không.
      *
      * Đọc thẳng quy ước từ TGS_POS_Order_Handler khi có, để hai plugin không
@@ -1126,7 +1154,8 @@ class TGS_Viettel_Invoice_Flow_Service
             : '0 AS local_ledger_item_is_kct';
         $optional_selects[] = $has_tax_amount ? 'i.local_ledger_item_tax_amount' : '0 AS local_ledger_item_tax_amount';
 
-        // ĐVT lúc bán — hoá đơn khai theo ĐVT này, xem sale_unit_view()
+        // Cột ĐVT lúc bán — dùng cho hiển thị bill POS (sale_unit_view). LƯU Ý: hoá đơn thuế
+        // khai theo ĐVCB nhỏ nhất (base_unit_view, ratio=1), KHÔNG theo ĐVT bán.
         foreach (['local_ledger_item_unit_name', 'local_ledger_item_unit_quantity', 'local_ledger_item_unit_ratio'] as $unit_col) {
             $optional_selects[] = $this->local_ledger_item_column_exists($unit_col)
                 ? 'i.' . $unit_col
@@ -1210,25 +1239,25 @@ class TGS_Viettel_Invoice_Flow_Service
             $line       = $money::from_item($item);
 
             /*
-             * ─── QUY VỀ ĐVT LÚC BÁN ─────────────────────────────────────────
+             * ─── KHAI THEO ĐVT NHỎ NHẤT (ĐVCB) ──────────────────────────────
              *
-             * Sổ kho ghi theo đơn vị nhỏ nhất (bán 1 Vỉ_4 → quantity = 4 Hộp),
-             * nhưng hoá đơn phải khai đúng thứ khách mua: "1 Vỉ_4". Xem
-             * sale_unit_view().
+             * KẾ TOÁN YÊU CẦU (2026-09): hoá đơn thuế khai theo ĐƠN VỊ NHỎ NHẤT
+             * (bán 1 Vỉ_4 → khai 4 Hộp), KHÔNG theo ĐVT bán như bill shop. Bill
+             * bán cho khách vẫn giữ ĐVT bán (không đụng). Xem base_unit_view() +
+             * mo-hinh-tien-va-bang-local-ledger-item.md §"Hoá đơn điện tử".
              *
-             * Đơn giá lấy bằng TIỀN HÀNG SAU CK CHIA CHO SỐ LƯỢNG THEO ĐVT BÁN
-             * — vẫn đúng công thức (3), chỉ khác mẫu số. KHÔNG nhân đơn giá đơn
-             * vị nhỏ nhất với tỷ lệ: đơn giá đó đã là số lẻ vô hạn tuần hoàn,
-             * nhân lên rồi làm tròn 4 số là tự chuốc sai lệch. Chia thẳng từ
-             * tiền hàng thì SL × đơn giá luôn khớp lại đúng tiền hàng.
+             * Đơn giá = TIỀN HÀNG SAU CK CHIA CHO SỐ LƯỢNG ĐVCB — vẫn đúng công
+             * thức (3), chỉ khác mẫu số (ĐVCB thay vì ĐVT bán). KHÔNG nhân đơn
+             * giá lên/xuống theo tỷ lệ rồi làm tròn (tự chuốc sai lệch); chia
+             * thẳng từ tiền hàng thì SL × đơn giá luôn khớp lại tiền hàng.
              */
-            $unit_view   = self::sale_unit_view($item);
+            $unit_view   = self::base_unit_view($item);
             $unit_name   = (string) $unit_view['unit_name'];
-            $sale_qty    = (float) $unit_view['quantity'];
+            $base_qty    = (float) $unit_view['quantity'];
             $line_amount = max(0.0, (float) $line['tien_hang_sau_ck']);
 
-            $unit_price = $sale_qty > 0
-                ? max(0.0, $line_amount / $sale_qty)
+            $unit_price = $base_qty > 0
+                ? max(0.0, $line_amount / $base_qty)
                 : max(0.0, (float) $line['don_gia_gui_thue']);
 
             $gift_meta = $this->extract_gift_meta($item['local_ledger_item_meta'] ?? '');
@@ -1247,13 +1276,13 @@ class TGS_Viettel_Invoice_Flow_Service
                 'sku' => (string) ($item['local_product_sku'] ?? ''),
                 'item_name' => (string) ($item['local_product_name'] ?? ''),
                 'unit_name' => $unit_name,
-                'quantity' => $sale_qty,
+                'quantity' => $base_qty,
                 /*
-                 * Tỷ lệ quy đổi của ĐVT bán, giữ lại trong snapshot để phiếu
-                 * điều chỉnh (trả hàng) quy được số lượng hoàn về CÙNG ĐVT với
-                 * hoá đơn gốc. Hoá đơn cũ phát hành trước khi có trường này thì
-                 * đọc ra 0 → coi như 1, tức vẫn là đơn vị nhỏ nhất, khớp đúng
-                 * cách hoá đơn đó đã khai.
+                 * Tỷ lệ quy đổi giữ trong snapshot để phiếu điều chỉnh (trả hàng)
+                 * quy số lượng hoàn về CÙNG ĐVT với hoá đơn gốc. Hoá đơn MỚI khai
+                 * theo ĐVCB nên ratio = 1 (return đọc ratio này → hoàn cũng theo
+                 * ĐVCB). Hoá đơn CŨ (khai ĐVT bán) đã lưu ratio thật của nó → phiếu
+                 * điều chỉnh vẫn quy đúng theo ĐVT của hoá đơn gốc đó.
                  */
                 'unit_ratio' => (float) $unit_view['ratio'],
                 'unit_price_after_discount' => $unit_price,

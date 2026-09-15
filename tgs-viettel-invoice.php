@@ -1669,17 +1669,16 @@ class TGS_Viettel_Invoice_Plugin
             $is_sku_ends_z = TGS_Viettel_Invoice_Flow_Service::is_promo_split_sku($sku);
 
             /*
-             * ─── HIỆN THEO ĐVT LÚC BÁN, KHÔNG PHẢI ĐƠN VỊ NHỎ NHẤT ──────────
+             * ─── HIỆN THEO ĐVT NHỎ NHẤT (ĐVCB) — GIỐNG HỆT HOÁ ĐƠN SẼ GỬI ─────
              *
-             * Bán 1 Vỉ_4 thì sổ kho ghi 4 Hộp. Màn review là bản xem trước của
-             * hoá đơn sắp gửi, nên phải hiện đúng "1 Vỉ_4" — giống hệt số sẽ
-             * khai lên cơ quan thuế (xem sale_unit_view()).
-             *
-             * `price` phải nhân theo tỷ lệ cùng lúc với `quantity`: bản xem
-             * trước tính tiền hàng bằng SL × giá − CK. Đổi mỗi số lượng mà giữ
-             * giá của đơn vị nhỏ nhất là tiền hàng tụt còn 1/4.
+             * Kế toán yêu cầu hoá đơn thuế khai theo ĐVCB (bán 1 Vỉ_4 → 4 Hộp).
+             * Màn review là bản xem trước của hoá đơn sắp gửi nên PHẢI hiện đúng
+             * ĐVCB, khớp payload gửi CQT (xem base_unit_view()). base_unit_view
+             * trả ratio = 1 + quantity = SL ĐVCB, nên `price × ratio` = giá 1 ĐVCB
+             * (row['price'] đã là giá/ĐVCB) — tiền hàng = SL_ĐVCB × giá vẫn đúng.
+             * (Bill bán cho khách vẫn ĐVT bán — chỗ đó không đụng.)
              */
-            $unit_view = TGS_Viettel_Invoice_Flow_Service::sale_unit_view($row);
+            $unit_view = TGS_Viettel_Invoice_Flow_Service::base_unit_view($row);
             $unit_ratio = max(1.0, (float) $unit_view['ratio']);
             $item = [
                 'item_id'                 => intval($row['local_ledger_item_id']),
@@ -1810,8 +1809,8 @@ class TGS_Viettel_Invoice_Plugin
             $has_local_product_sku = $this->flow_service->local_ledger_item_column_exists('local_product_sku');
             $sku_sql = $has_local_product_sku ? ', i.local_product_sku' : ", '' AS local_product_sku";
 
-            // ĐVT lúc bán — danh sách này hiện kèm phiếu tách quà, phải khớp
-            // với ĐVT mà hoá đơn khai (xem sale_unit_view()).
+            // Cột ĐVT lúc bán — danh sách tách quà. Hiển thị/khai hoá đơn thuế theo ĐVCB
+            // nhỏ nhất (base_unit_view, ratio=1); các cột này chỉ để suy ra ĐVCB.
             $unit_cols_sql = '';
             foreach (['local_ledger_item_unit_name', 'local_ledger_item_unit_quantity', 'local_ledger_item_unit_ratio'] as $unit_col) {
                 $unit_cols_sql .= $this->flow_service->local_ledger_item_column_exists($unit_col)
@@ -1842,8 +1841,8 @@ class TGS_Viettel_Invoice_Plugin
             }
 
             foreach ($rows as $row) {
-                // Hiện theo ĐVT lúc bán, giống màn review và hoá đơn
-                $unit_view = TGS_Viettel_Invoice_Flow_Service::sale_unit_view($row);
+                // Hiện theo ĐVT NHỎ NHẤT (ĐVCB), giống màn review và hoá đơn thuế (base_unit_view: ratio=1).
+                $unit_view = TGS_Viettel_Invoice_Flow_Service::base_unit_view($row);
                 $items[] = [
                     'item_id'   => intval($row['local_ledger_item_id']),
                     'name'      => (string) ($row['local_product_name'] ?? ''),

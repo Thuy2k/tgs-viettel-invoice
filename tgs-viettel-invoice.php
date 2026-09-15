@@ -3851,6 +3851,24 @@ class TGS_Viettel_Invoice_Plugin
                 'invoiceNo',
             ]);
 
+            // ĐẨY THÔNG TIN VAT SANG HTsoft (best-effort, KHÔNG chặn) — để đơn hàng bên kế toán HTsoft
+            // gắn được với hóa đơn VAT. Gate + bỏ qua bill Z/đơn chưa đẩy nằm trong push_invoice_vat.
+            if (class_exists('TGS_POS_HTsoft_Invoice_Push')
+                && method_exists('TGS_POS_HTsoft_Invoice_Push', 'push_invoice_vat')) {
+                global $wpdb;
+                $vat_sale_id = (int) $wpdb->get_var($wpdb->prepare(
+                    'SELECT sale_ledger_id FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . ' WHERE local_viettel_invoice_id = %d',
+                    $tracking_id
+                ));
+                if ($vat_sale_id > 0) {
+                    try {
+                        TGS_POS_HTsoft_Invoice_Push::push_invoice_vat($vat_sale_id);
+                    } catch (\Throwable $e) {
+                        error_log('[TGS Viettel] push VAT->HTsoft loi: ' . $e->getMessage());
+                    }
+                }
+            }
+
             wp_send_json_success([
                 'message'          => 'Phát hành và gửi CQT thành công!',
                 'transaction_uuid' => $transaction_uuid,

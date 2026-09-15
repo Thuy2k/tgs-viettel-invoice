@@ -553,6 +553,21 @@ class TGS_Viettel_Invoice_Return_Adjustment
             'processed_at' => $status === 'done' ? current_time('mysql') : null,
         ]);
 
+        // ĐẨY VAT ĐIỀU CHỈNH GIẢM SANG HTsoft (best-effort, KHÔNG chặn) — phiếu hàng bán trả lại bên
+        // kế toán HTsoft gắn được với hóa đơn điều chỉnh. Gate + bỏ qua nằm trong push_return_vat.
+        if ($status === 'done'
+            && class_exists('TGS_POS_HTsoft_Invoice_Push')
+            && method_exists('TGS_POS_HTsoft_Invoice_Push', 'push_return_vat')) {
+            $vat_return_id = intval($queue['return_ledger_id'] ?? 0);
+            if ($vat_return_id > 0) {
+                try {
+                    TGS_POS_HTsoft_Invoice_Push::push_return_vat($vat_return_id);
+                } catch (\Throwable $e) {
+                    error_log('[TGS Viettel] push VAT hoàn->HTsoft loi: ' . $e->getMessage());
+                }
+            }
+        }
+
         return [
             'id' => intval($queue_id),
             'status' => $status,

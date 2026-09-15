@@ -1445,13 +1445,18 @@ class TGS_Viettel_Invoice_Flow_Service
 
             /*
              * Quà order-level (quà chờ kế toán duyệt / quà theo giá trị đơn)
-             * không có parent line, vì vậy TUYỆT ĐỐI không dùng
-             * has_under24_main để loại toàn bộ quà. Chỉ line gift có parent
-             * dưới 24m mới bị loại tự động.
+             * không có parent line. Tuy nhiên, nếu bill có ít nhất một hàng
+             * chính đặc biệt dưới 24 tháng thì quà-bill cũng không được đưa
+             * lên payload thuế. Bill chỉ có hàng bình thường vẫn giữ nguyên
+             * quà-bill để khai bình thường.
              */
             $parent_is_under24 = ($parent_sku !== '' && isset($under24_lookup[$parent_sku]))
                 || ($parent_product_id > 0 && isset($under24_main_product_ids[$parent_product_id]));
             if ($is_line_gift && $has_resolved_parent && $parent_is_under24) {
+                continue;
+            }
+
+            if ($is_order_gift && !empty($under24_main_skus)) {
                 continue;
             }
 

@@ -94,6 +94,8 @@ class TGS_Viettel_Invoice_Plugin
         add_action('wp_ajax_nopriv_tgs_viettel_pos_send_invoice_email', [$this, 'ajax_pos_send_invoice_email']);
         add_action('wp_ajax_tgs_viettel_pos_preview_invoice_pdf', [$this, 'ajax_pos_preview_invoice_pdf']);
         add_action('wp_ajax_nopriv_tgs_viettel_pos_preview_invoice_pdf', [$this, 'ajax_pos_preview_invoice_pdf']);
+        add_action('wp_ajax_tgs_viettel_pos_preview_adjustment_pdf', [$this, 'ajax_pos_preview_adjustment_pdf']);
+        add_action('wp_ajax_nopriv_tgs_viettel_pos_preview_adjustment_pdf', [$this, 'ajax_pos_preview_adjustment_pdf']);
         add_action('wp_ajax_tgs_viettel_get_sale_debug_log', [$this, 'ajax_get_sale_debug_log']);
         add_action('wp_ajax_tgs_viettel_pos_list_statuses', [$this, 'ajax_pos_list_statuses']);
         add_action('wp_ajax_nopriv_tgs_viettel_pos_list_statuses', [$this, 'ajax_pos_list_statuses']);
@@ -2674,6 +2676,89 @@ class TGS_Viettel_Invoice_Plugin
             'mime_type' => 'application/pdf',
             'file_bytes_base64' => $file_bytes,
             'api_http_code' => intval($pdf_result['http_code'] ?? 0),
+        ]);
+    }
+
+    /**
+     * XEM PDF HÓA ĐƠN ĐIỀU CHỈNH (hàng bán trả lại) thực tế từ Viettel — cho màn POS
+     * "Kiểm tra gửi thuế" dòng Điều chỉnh giảm. Tái dùng fetch_invoice_representation_file
+     * với SỐ hóa đơn điều chỉnh (adjustment_invoice_no) + templateCode từ payload đã gửi.
+     */
+    public function ajax_pos_preview_adjustment_pdf()
+    {
+        $this->bootstrap_requested_blog_context();
+        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+        if (empty($nonce) || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+            return;
+        }
+        if (!$this->current_user_can_use_pos()) {
+            wp_send_json_error(['message' => 'Bạn không có quyền xem PDF.'], 403);
+            return;
+        }
+        $return_ledger_id = intval($_POST['return_ledger_id'] ?? 0);
+        if ($return_ledger_id <= 0) {
+            wp_send_json_error(['message' => 'Thiếu return_ledger_id.'], 400);
+            return;
+        }
+
+        global $wpdb;
+        $tbl = class_exists('TGS_Viettel_Invoice_Clusters')
+            ? (string) (TGS_Viettel_Invoice_Clusters::instance()->tables()['return_adjustments'] ?? '')
+            : $wpdb->base_prefix . 'tgs_viettel_invoice_return_adjustments';
+        if ($tbl === '') {
+            wp_send_json_error(['message' => 'Thiếu bảng điều chỉnh giảm.'], 500);
+            return;
+        }
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT adjustment_invoice_no, request_payload, status, original_invoice_record_id
+               FROM {$tbl} WHERE blog_id = %d AND return_ledger_id = %d ORDER BY id DESC LIMIT 1",
+            get_current_blog_id(),
+            $return_ledger_id
+        ), ARRAY_A);
+        if (empty($row)) {
+            wp_send_json_error(['message' => 'Chưa có hóa đơn điều chỉnh cho phiếu hoàn này.'], 404);
+            return;
+        }
+        $invoice_no = trim((string) ($row['adjustment_invoice_no'] ?? ''));
+        if ($invoice_no === '') {
+            wp_send_json_error(['message' => 'Hóa đơn điều chỉnh chưa có số (chưa phát hành xong?).'], 400);
+            return;
+        }
+
+        $pay = json_decode((string) ($row['request_payload'] ?? ''), true);
+        $template_code = is_array($pay) ? sanitize_text_field((string) ($pay['generalInvoiceInfo']['templateCode'] ?? '')) : '';
+        if ($template_code === '') {
+            $defaults = self::get_default_settings();
+            $template_code = $defaults['default_template_code'] ?? '1/1156';
+        }
+        $settings = self::get_settings_for_invoice(intval($row['original_invoice_record_id'] ?? 0));
+        $supplier_tax_code = sanitize_text_field($settings['supplier_tax_code'] ?? '');
+        if ($supplier_tax_code === '') {
+            wp_send_json_error(['message' => 'Thiếu MST nhà cung cấp trong cấu hình Viettel.'], 400);
+            return;
+        }
+
+        $pdf = $this->fetch_invoice_representation_file($settings, $supplier_tax_code, $invoice_no, $template_code, 'PDF');
+        if (empty($pdf['success'])) {
+            wp_send_json_error([
+                'message'   => $pdf['message'] ?? 'Không lấy được PDF hóa đơn điều chỉnh.',
+                'http_code' => intval($pdf['http_code'] ?? 0),
+            ], 400);
+            return;
+        }
+        $file_bytes = (string) ($pdf['file_bytes_base64'] ?? '');
+        if ($file_bytes === '') {
+            wp_send_json_error(['message' => 'API trả về thiếu fileToBytes.'], 400);
+            return;
+        }
+        $safe = preg_replace('/[^A-Za-z0-9\-_]/', '_', $invoice_no);
+        wp_send_json_success([
+            'message'           => 'Đã lấy PDF hóa đơn điều chỉnh.',
+            'invoice_no'        => $invoice_no,
+            'file_name'         => $supplier_tax_code . '-DC-' . $safe . '.pdf',
+            'mime_type'         => 'application/pdf',
+            'file_bytes_base64' => $file_bytes,
         ]);
     }
 

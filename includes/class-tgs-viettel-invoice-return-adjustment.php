@@ -755,7 +755,11 @@ class TGS_Viettel_Invoice_Return_Adjustment
                 'itemCode' => (string) ($source['sku'] ?? ''),
                 'itemName' => (string) ($source['item_name'] ?? ''),
                 'unitName' => (string) ($source['unit_name'] ?? ''),
-                'quantity' => $quantity,
+                // ĐIỀU CHỈNH GIẢM SỐ LƯỢNG (hàng bán trả lại): số lượng phải ÂM (khớp CQT +
+                // HTsoft native adjustType=2: quantity = -quantity, còn TIỀN giữ DƯƠNG/Abs,
+                // isIncreaseItem=false -> Viettel render tiền âm trên hóa đơn). $quantity gốc
+                // (dương) vẫn dùng tính tiền ở trên; chỉ ĐẢO DẤU ở cột số lượng gửi đi.
+                'quantity' => -$quantity,
                 // Số chữ số thập phân do Viettel cấu hình, xem
                 // TGS_Viettel_Invoice_Flow_Service::unit_price_decimals(): lẻ
                 // hơn là trả INVALID_DECIMAL_POINT_PRICE, không phát hành được.
@@ -768,7 +772,9 @@ class TGS_Viettel_Invoice_Return_Adjustment
                 'taxPercentage' => $api_tax_code,
                 'taxAmount' => $tax,
                 'isIncreaseItem' => false,
-                'itemNote' => 'Điều chỉnh giảm do trả hàng - ' . (string) ($return['local_ledger_code'] ?? ''),
+                // Viettel render dòng: "{itemNote} của hàng hóa dịch vụ: {itemName}".
+                // Kế toán yêu cầu prefix = "Điều chỉnh giảm số lượng" (khớp CQT + HTsoft native).
+                'itemNote' => 'Điều chỉnh giảm số lượng',
             ];
 
             // Nhóm KCT đứng riêng với nhóm 0% trong bảng tổng hợp thuế.
@@ -821,9 +827,31 @@ class TGS_Viettel_Invoice_Return_Adjustment
                 ? wp_generate_uuid4()
                 : $this->deterministic_uuid(get_current_blog_id() . ':' . intval($queue['return_ledger_id']));
         }
-        $reason = trim((string) ($return['local_ledger_note'] ?? ''));
-        $reference = 'Phiếu hoàn ' . (string) ($return['local_ledger_code'] ?? '') . ($reason !== '' ? ': ' . $reason : '');
-        $reference = function_exists('mb_substr') ? mb_substr($reference, 0, 225) : substr($reference, 0, 225);
+        /*
+         * ─── DIỄN GIẢI CHUẨN CQT cho hóa đơn ĐIỀU CHỈNH GIẢM (hàng bán trả lại) ───
+         *
+         * Kế toán yêu cầu (khớp mẫu CQT):
+         *   Ghi chú (invoiceNote) = "Hóa đơn điều chỉnh giảm <tổng giảm> cho hóa đơn điện tử
+         *       mẫu <mẫu>, ký hiệu <ký hiệu gốc>, số <số HĐ gốc> lập ngày <ngày gốc>
+         *       (Điều chỉnh giảm số lượng do hàng bán bị trả lại)".
+         *   Lý do sai sót (adjustedNote) = "Điều chỉnh tiền do hàng bán trả lại".
+         */
+        $sum_with_tax = (float) $sum_before + (float) $sum_tax; // tổng tiền điều chỉnh giảm (gồm thuế)
+        $mau_raw = (string) ($original['template_code'] ?? ($original_general['templateCode'] ?? ''));
+        $mau_so  = preg_match('/(\d+)/', $mau_raw, $mm) ? $mm[1] : '1'; // mẫu số (vd '1/006' -> '1')
+        $seri_goc = (string) ($original['invoice_series'] ?? ($original_general['invoiceSeries'] ?? ''));
+        $ngay_ms  = (int) $this->invoice_issue_time_ms($original);
+        $ngay_goc = $ngay_ms > 0 ? gmdate('d/m/Y', (int) round($ngay_ms / 1000)) : '';
+        $tien_giam_txt = number_format($sum_with_tax, 0, ',', '.');
+
+        $note_cqt = 'Hóa đơn điều chỉnh giảm ' . $tien_giam_txt
+            . ' cho hóa đơn điện tử mẫu ' . $mau_so
+            . ', ký hiệu ' . $seri_goc
+            . ', số ' . $invoice_id
+            . ($ngay_goc !== '' ? ' lập ngày ' . $ngay_goc : '')
+            . ' (Điều chỉnh giảm số lượng do hàng bán bị trả lại)';
+        $note_cqt = function_exists('mb_substr') ? mb_substr($note_cqt, 0, 400) : substr($note_cqt, 0, 400);
+        $ly_do_saisot = 'Điều chỉnh tiền do hàng bán trả lại';
 
         $general = [
             'invoiceType' => (string) ($original_general['invoiceType'] ?? '1'),
@@ -842,9 +870,9 @@ class TGS_Viettel_Invoice_Return_Adjustment
             'adjustmentInvoiceType' => '1',
             'originalInvoiceId' => $invoice_id,
             'originalInvoiceIssueDate' => $this->invoice_issue_time_ms($original),
-            'adjustedNote' => $reason !== '' ? $reason : 'Khách hoàn trả hàng',
-            'invoiceNote' => $reference,
-            'additionalReferenceDesc' => $reference,
+            'adjustedNote' => $ly_do_saisot,
+            'invoiceNote' => $note_cqt,
+            'additionalReferenceDesc' => $note_cqt,
             'additionalReferenceDate' => $now_ms,
             'autoAgreementDoc' => true,
             'paymentStatus' => true,
@@ -885,10 +913,10 @@ class TGS_Viettel_Invoice_Return_Adjustment
              * Xem TGS_Viettel_Invoice_Flow_Service::build_invoice_metadata().
              */
             'metadata' => class_exists('TGS_Viettel_Invoice_Flow_Service')
-                ? TGS_Viettel_Invoice_Flow_Service::build_invoice_metadata($document_code_value, $reference)
+                ? TGS_Viettel_Invoice_Flow_Service::build_invoice_metadata($document_code_value, $note_cqt)
                 : [[
                     'keyTag' => 'invoiceNote',
-                    'stringValue' => $reference,
+                    'stringValue' => $note_cqt,
                     'valueType' => 'text',
                     'keyLabel' => 'Ghi chú',
                 ]],

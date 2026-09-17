@@ -1032,6 +1032,9 @@ class TGS_Viettel_Invoice_Return_Adjustment
                 'adjustment_label' => 'Hóa đơn điều chỉnh giảm',
                 'original_invoice_no' => $this->original_invoice_id($original),
                 'reference' => (string) ($general['additionalReferenceDesc'] ?? ''),
+                // Lý do sai sót + Ghi chú (giống tờ Viettel thật) — để màn xem trước hiển thị sát.
+                'adjusted_note' => (string) ($general['adjustedNote'] ?? ''),
+                'invoice_note' => (string) ($general['invoiceNote'] ?? ''),
                 /*
                  * ─── ĐỦ DỮ LIỆU ĐỂ VẼ ĐÚNG TỜ HOÁ ĐƠN ĐIỀU CHỈNH ────────────
                  *

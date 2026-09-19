@@ -2392,7 +2392,7 @@ class TGS_Viettel_Invoice_Plugin
         $created_by = get_current_user_id();
         $latest = $wpdb->get_row(
             $wpdb->prepare(
-                'SELECT local_viettel_invoice_id, sale_ledger_id, local_ledger_code, invoice_state, template_code, issue_response_payload
+                'SELECT local_viettel_invoice_id, sale_ledger_id, local_ledger_code, invoice_state, template_code, viettel_invoice_no, issue_response_payload
                  FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . '
                  WHERE sale_ledger_id = %d
                  ORDER BY local_viettel_invoice_id DESC
@@ -2412,7 +2412,11 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        $invoice_no = $this->extract_invoice_no_from_issue_payload($latest['issue_response_payload'] ?? '');
+        // Ưu tiên SỐ đã lưu (viettel_invoice_no), thiếu mới suy từ payload.
+        $invoice_no = sanitize_text_field((string) ($latest['viettel_invoice_no'] ?? ''));
+        if ($invoice_no === '') {
+            $invoice_no = $this->extract_invoice_no_from_issue_payload($latest['issue_response_payload'] ?? '');
+        }
         if ($invoice_no === '') {
             wp_send_json_error(['message' => 'Không lấy được invoiceNo để tải file PDF.'], 400);
             return;
@@ -2723,7 +2727,7 @@ class TGS_Viettel_Invoice_Plugin
         $created_by = get_current_user_id();
         $latest = $wpdb->get_row(
             $wpdb->prepare(
-                'SELECT local_viettel_invoice_id, sale_ledger_id, local_ledger_code, invoice_state, template_code, issue_response_payload
+                'SELECT local_viettel_invoice_id, sale_ledger_id, local_ledger_code, invoice_state, template_code, viettel_invoice_no, issue_response_payload
                  FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . '
                  WHERE sale_ledger_id = %d
                  ORDER BY local_viettel_invoice_id DESC
@@ -2743,7 +2747,11 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
 
-        $invoice_no = $this->extract_invoice_no_from_issue_payload($latest['issue_response_payload'] ?? '');
+        // Ưu tiên SỐ đã lưu (viettel_invoice_no — có thể do tra cứu/nhập tay khi issue trả rỗng), thiếu mới suy từ payload.
+        $invoice_no = sanitize_text_field((string) ($latest['viettel_invoice_no'] ?? ''));
+        if ($invoice_no === '') {
+            $invoice_no = $this->extract_invoice_no_from_issue_payload($latest['issue_response_payload'] ?? '');
+        }
         if ($invoice_no === '') {
             wp_send_json_error(['message' => 'Không lấy được invoiceNo để tải file PDF.'], 400);
             return;

@@ -89,6 +89,7 @@ class TGS_Viettel_Invoice_Plugin
         add_action('wp_ajax_tgs_viettel_send_from_sale', [$this, 'ajax_send_from_sale']);
         add_action('wp_ajax_nopriv_tgs_viettel_send_from_sale', [$this, 'ajax_send_from_sale']);
         add_action('wp_ajax_tgs_viettel_pos_retry_invoice', [$this, 'ajax_pos_retry_invoice']);
+        add_action('wp_ajax_tgs_viettel_pos_recover_invoice_no', [$this, 'ajax_pos_recover_invoice_no']);
         add_action('wp_ajax_nopriv_tgs_viettel_pos_retry_invoice', [$this, 'ajax_pos_retry_invoice']);
         add_action('wp_ajax_tgs_viettel_pos_send_invoice_email', [$this, 'ajax_pos_send_invoice_email']);
         add_action('wp_ajax_nopriv_tgs_viettel_pos_send_invoice_email', [$this, 'ajax_pos_send_invoice_email']);
@@ -2206,6 +2207,138 @@ class TGS_Viettel_Invoice_Plugin
     }
 
     /**
+     * POS: "TRA SỐ VIETTEL" — cho đơn phát hành HỤT (Viettel trả invoiceNo rỗng, chỉ có TransactionUuid).
+     * KHÔNG tạo hóa đơn mới (tránh trùng). Dùng ĐÚNG transaction_uuid cũ để:
+     *   1) Tra số hóa đơn theo TransactionUuid (searchInvoiceByTransactionUuid) → nếu Viettel đã cấp số thì lấy về.
+     *   2) Có số → đánh dấu đã phát hành (issue_status=1) rồi GỬI CQT bằng uuid cũ → 'done'.
+     * Không có số → hóa đơn thật sự chưa tạo được, báo rõ để kiểm tra. $_POST: sale_ledger_id, nonce, blog_id.
+     */
+    public function ajax_pos_recover_invoice_no()
+    {
+        $this->bootstrap_requested_blog_context();
+        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+        if (empty($nonce) || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403); return;
+        }
+        if (!$this->current_user_can_use_pos()) {
+            wp_send_json_error(['message' => 'Bạn không có quyền.'], 403); return;
+        }
+        if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
+            wp_send_json_error(['message' => 'Chưa có bảng theo dõi hóa đơn Viettel.'], 500); return;
+        }
+        $sale_ledger_id = intval($_POST['sale_ledger_id'] ?? 0);
+        if ($sale_ledger_id <= 0) { wp_send_json_error(['message' => 'Thiếu sale_ledger_id.'], 400); return; }
+
+        $lock = $this->acquire_sale_invoice_lock($sale_ledger_id);
+        if ($lock === '') {
+            wp_send_json_error(['message' => 'Đơn đang được xử lý, thử lại sau.', 'step' => 'already_processing'], 409); return;
+        }
+
+        global $wpdb;
+        $latest = $this->get_latest_sale_invoice($sale_ledger_id);
+        $invoice_id = intval($latest['local_viettel_invoice_id'] ?? 0);
+        $transaction_uuid = sanitize_text_field($latest['issue_transaction_uuid'] ?? '');
+        if ($invoice_id <= 0) {
+            wp_send_json_error(['message' => 'Đơn chưa từng phát hành hóa đơn — dùng nút "gửi lại" để phát hành.'], 400);
+            return;
+        }
+
+        // NHẬP TAY: nếu người dùng đưa sẵn SỐ hóa đơn (đọc từ portal Viettel) thì dùng luôn, khỏi tra.
+        $manual_no = preg_replace('/[^A-Za-z0-9\/._-]/', '', sanitize_text_field((string) wp_unslash($_POST['manual_invoice_no'] ?? '')));
+
+        $invoice_no = '';
+        if ($manual_no !== '') {
+            $invoice_no = $manual_no;
+            $wpdb->update(TGS_TABLE_LOCAL_VIETTEL_INVOICE,
+                ['viettel_invoice_no' => $invoice_no, 'updated_at' => current_time('mysql')],
+                ['local_viettel_invoice_id' => $invoice_id]);
+        } else {
+            // TỰ TRA: thử TẤT CẢ transaction_uuid của đơn — bấm "gửi lại" nhiều lần sinh nhiều transaction,
+            // hóa đơn thật chỉ gắn 1 cái, nên dò lần lượt (mới→cũ) tới khi ra số.
+            $records = $wpdb->get_results($wpdb->prepare(
+                'SELECT local_viettel_invoice_id FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . "
+                 WHERE sale_ledger_id = %d AND issue_transaction_uuid <> ''
+                 ORDER BY local_viettel_invoice_id DESC",
+                $sale_ledger_id
+            ), ARRAY_A);
+            foreach ((array) $records as $rec) {
+                $rid = intval($rec['local_viettel_invoice_id'] ?? 0);
+                if ($rid <= 0) { continue; }
+                $found = (string) $this->recover_invoice_number_by_transaction_uuid($rid);
+                if ($found !== '') { $invoice_no = $found; break; }
+            }
+            // Tra được ở record cũ → lưu số lên record MỚI NHẤT để report + luồng sau dùng.
+            if ($invoice_no !== '') {
+                $wpdb->update(TGS_TABLE_LOCAL_VIETTEL_INVOICE,
+                    ['viettel_invoice_no' => $invoice_no, 'updated_at' => current_time('mysql')],
+                    ['local_viettel_invoice_id' => $invoice_id]);
+            }
+        }
+
+        if ($invoice_no === '') {
+            wp_send_json_error([
+                'message' => 'Chưa tự tra được số. Nếu bạn THẤY hóa đơn ĐÃ có trên Viettel, nhập tay SỐ HÓA ĐƠN (vd C26MLY53566) để lưu.',
+                'step' => 'no_invoice_no',
+                'allow_manual' => true,
+            ], 400);
+            return;
+        }
+
+        // 2) CÓ SỐ ⇒ hóa đơn đã phát hành THẬT trên Viettel (Viettel không cấp số cho hóa đơn chưa lập).
+        // Thử gửi CQT best-effort bằng uuid cũ (phòng đơn chưa gửi CQT), nhưng dù kết quả thế nào cũng
+        // CHỐT 'done' — vì có số hợp lệ nghĩa là đã phát hành. Nếu Viettel đã gửi CQT trước đó thì send_cqt
+        // có thể báo trùng (không sao). Mục tiêu: đưa đơn về 'done' để MỞ luồng tiếp theo (đẩy VAT HTsoft,
+        // clone DB VAT, định khoản) — các bước đó yêu cầu invoice_state='done'.
+        $created_by = get_current_user_id();
+        $cqt_fresh  = false;
+        if ($this->flow_service && $transaction_uuid !== '') {
+            $settings = self::get_settings_for_invoice($invoice_id);
+            $cqt_payload_result = $this->flow_service->build_send_cqt_payload(
+                sanitize_text_field($settings['supplier_tax_code'] ?? ''), $transaction_uuid
+            );
+            if (!empty($cqt_payload_result['success'])) {
+                $cqt_payload = $cqt_payload_result['payload'];
+                $cqt_payload['local_ledger_code'] = sanitize_text_field($latest['local_ledger_code'] ?? '');
+                $cqt_result = $this->submit_invoice_payload($cqt_payload, 'send_cqt', [
+                    'skip_persist'      => true,
+                    'invoice_record_id' => $invoice_id,
+                    'step_name'         => 'send_cqt_after_recover',
+                    'action_name'       => 'send_cqt_after_recover',
+                    'transaction_uuid'  => $transaction_uuid,
+                    'created_by'        => $created_by,
+                    'sale_ledger_id'    => $sale_ledger_id,
+                ]);
+                $cqt_fresh = !empty($cqt_result['success']);
+                if ($cqt_fresh) {
+                    $this->update_auto_flow_tracking($invoice_id, [
+                        'cqt_response_payload' => wp_json_encode($cqt_result['response'] ?? $cqt_result, JSON_UNESCAPED_UNICODE),
+                        'cqt_http_code'        => intval($cqt_result['http_code'] ?? 0),
+                    ]);
+                }
+            }
+        }
+
+        // CHỐT 'done' + xóa mọi cờ lỗi (có số = đã phát hành). Đơn giờ hợp lệ cho các bước sau.
+        $this->update_auto_flow_tracking($invoice_id, [
+            'issue_status'      => 1,
+            'invoice_state'     => 'done',
+            'send_cqt_status'   => 1,
+            'cqt_error_message' => '',
+            'error_message'     => '',
+            'cqt_sent_at'       => current_time('mysql'),
+            'updated_at'        => current_time('mysql'),
+        ]);
+
+        wp_send_json_success([
+            'message'    => 'Đã lấy số hóa đơn ' . $invoice_no . ' về và chốt "Thành công"'
+                . ($cqt_fresh ? ' (đã gửi cơ quan thuế).' : ' (hóa đơn đã có trên Viettel).'),
+            'invoice_no' => $invoice_no,
+            'cqt_ok'     => true,
+            'sale_ledger_id' => $sale_ledger_id,
+        ]);
+    }
+
+    /**
      * POS: gửi email file PDF hóa đơn từ danh sách "Thành công".
      */
     public function ajax_pos_send_invoice_email()
@@ -3902,6 +4035,23 @@ class TGS_Viettel_Invoice_Plugin
                 return;
             }
 
+            // ─── FIX GỐC: Viettel cấp SỐ HÓA ĐƠN BẤT ĐỒNG BỘ ──────────────────
+            // createInvoice có thể trả invoiceNo RỖNG (chỉ có transactionUuid + reservationCode) — Viettel
+            // dặn "tra cứu theo TransactionUuid để lấy số". Nếu gửi CQT NGAY lúc chưa có số thì dính
+            // INVOICE_NOT_FOUND → đơn báo lỗi oan (dù thực tế đã phát hành). Nên: khi chưa có số, TỰ TRA
+            // theo transactionUuid (retry ngắn vì Viettel xử lý chậm vài giây) để lấy số + xác nhận hóa đơn
+            // đã hoàn tất TRƯỚC khi gửi CQT. Nhờ đó từ nay không còn hiện tượng "phát hành hụt" oan.
+            $issued_no = sanitize_text_field($this->deep_pick($issue_result['response'] ?? [], [
+                'result.invoiceNo', 'data.invoiceNo', 'invoiceNo', 'invoiceNumber',
+            ]));
+            if ($issued_no === '') {
+                for ($recover_try = 0; $recover_try < 3; $recover_try++) {
+                    $recovered_no = (string) $this->recover_invoice_number_by_transaction_uuid($tracking_id);
+                    if ($recovered_no !== '') { break; }
+                    sleep(1); // chờ Viettel cấp số xong rồi tra lại
+                }
+            }
+
             // Bước 4: Gửi CQT
             $cqt_payload_result = $this->flow_service->build_send_cqt_payload(
                 sanitize_text_field($settings['supplier_tax_code'] ?? ''),
@@ -4317,6 +4467,20 @@ class TGS_Viettel_Invoice_Plugin
                 'step' => 'transaction_uuid',
                 'message' => 'Không lấy được transactionUuid sau khi phát hành.',
             ];
+        }
+
+        // FIX GỐC (xem giải thích ở ajax_send_from_sale): Viettel cấp số BẤT ĐỒNG BỘ — khi invoiceNo rỗng,
+        // TỰ TRA theo transactionUuid (retry ngắn) để lấy số + xác nhận hóa đơn đã hoàn tất TRƯỚC khi gửi CQT,
+        // tránh INVOICE_NOT_FOUND → đơn báo lỗi oan dù đã phát hành.
+        $issued_no = sanitize_text_field($this->deep_pick($issue_result['response'] ?? [], [
+            'result.invoiceNo', 'data.invoiceNo', 'invoiceNo', 'invoiceNumber',
+        ]));
+        if ($issued_no === '') {
+            for ($recover_try = 0; $recover_try < 3; $recover_try++) {
+                $recovered_no = (string) $this->recover_invoice_number_by_transaction_uuid($tracking_id);
+                if ($recovered_no !== '') { break; }
+                sleep(1);
+            }
         }
 
         $send_cqt_payload_result = $this->flow_service->build_send_cqt_payload(

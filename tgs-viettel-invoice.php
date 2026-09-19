@@ -1016,6 +1016,7 @@ class TGS_Viettel_Invoice_Plugin
                     vi.invoice_state,
                     vi.issue_status,
                     vi.send_cqt_status,
+                    vi.viettel_invoice_no,
                     vi.contains_under24_main_item,
                     vi.issue_transaction_uuid,
                     vi.issue_http_code,
@@ -1084,7 +1085,33 @@ class TGS_Viettel_Invoice_Plugin
                 $row['send_cqt_status'] = intval($row['send_cqt_status'] ?? 0);
                 $row['issue_http_code'] = intval($row['issue_http_code'] ?? 0);
                 $row['cqt_http_code'] = intval($row['cqt_http_code'] ?? 0);
-                $row['invoice_no'] = $this->extract_invoice_no_from_issue_payload($row['issue_response_payload'] ?? '');
+                // Số hóa đơn: ưu tiên cột đã lưu (viettel_invoice_no — có thể do tra cứu theo
+                // TransactionUuid khi issue trả rỗng), thiếu thì suy từ payload phát hành.
+                $stored_no = sanitize_text_field((string) ($row['viettel_invoice_no'] ?? ''));
+                $row['invoice_no'] = $stored_no !== ''
+                    ? $stored_no
+                    : $this->extract_invoice_no_from_issue_payload($row['issue_response_payload'] ?? '');
+                // ─── SỬA BÁO NHẦM "THÀNH CÔNG" ───────────────────────────────────
+                // Viettel trả HTTP 200 CẢ KHI nghiệp vụ FAIL (vd issue trả invoiceNo rỗng —
+                // "sử dụng API Tra cứu... để lấy số"; send_cqt trả success:0/fail:1 INVOICE_NOT_FOUND).
+                // Nếu chỉ dựa invoice_state='done' thì đơn PHÁT HÀNH HỤT vẫn bị đếm thành công →
+                // mất nút gửi lại. Chuẩn "phát hành xong" = CÓ SỐ HÓA ĐƠN (cột lưu hoặc payload).
+                // Không có số ở đâu cả → hạ về 'issue_error' (UI tự hiện "Lỗi" + nút gửi lại).
+                // Chỉ chạm đơn HOÀN TOÀN KHÔNG có số nên an toàn (đơn đã tra số vẫn giữ 'done').
+                if (in_array($row['invoice_state'], ['done', 'issued'], true)
+                    && ($row['invoice_no'] === '' || $row['invoice_no'] === null)) {
+                    $row['invoice_state'] = 'issue_error';
+                    if (empty($row['error_message'])) {
+                        $row['error_message'] = 'Viettel chưa cấp số hóa đơn (phát hành chưa hoàn tất) — cần gửi lại.';
+                    }
+                } elseif (in_array($row['invoice_state'], ['done', 'issued'], true)
+                    && intval($row['send_cqt_status']) === 2) {
+                    // Có số HĐ nhưng GỬI CQT HỎNG (send_cqt_status=2) mà vẫn bị ghi 'done' → cần gửi CQT lại.
+                    $row['invoice_state'] = 'cqt_error';
+                    if (empty($row['error_message'])) {
+                        $row['error_message'] = 'Đã phát hành nhưng gửi cơ quan thuế lỗi — cần gửi lại.';
+                    }
+                }
                 $row['template_code'] = sanitize_text_field($row['template_code'] ?? '');
                 if ($row['template_code'] === '') {
                     $defaults = self::get_default_settings();

@@ -112,6 +112,77 @@ class TGS_Viettel_Invoice_Replacement
         self::$table_ready = true;
     }
 
+    /**
+     * NHẬP TAY hoá đơn thay thế: kế toán đã LẬP hoá đơn thay thế trên portal Viettel,
+     * giờ chỉ GẮN số hoá đơn mới vào phiếu để bước đẩy VAT HTsoft + đẩy data VAT dùng
+     * ĐÚNG số mới (tránh lệch số/tiền khi kế toán đối chiếu). KHÔNG gọi API Viettel.
+     *
+     * - Cập nhật viettel_invoice_no của bản ghi hoá đơn mới nhất -> số mới.
+     * - Ghi 1 dòng log vào bảng replacements (status='manual_import') để báo cáo sau.
+     *
+     * @return array ['success'=>bool,'message'=>string,'old_no'?=>string,'new_no'?=>string]
+     */
+    public function record_manual_replacement($sale_id, $new_invoice_no, $created_by = 0)
+    {
+        global $wpdb;
+        $sale_id = (int) $sale_id;
+        $new_invoice_no = trim((string) $new_invoice_no);
+        if ($sale_id <= 0 || $new_invoice_no === '') {
+            return ['success' => false, 'message' => 'Thiếu phiếu hoặc số hoá đơn thay thế.'];
+        }
+        if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
+            return ['success' => false, 'message' => 'Chưa có bảng hoá đơn Viettel.'];
+        }
+
+        $inv = $wpdb->get_row($wpdb->prepare(
+            'SELECT local_viettel_invoice_id, viettel_invoice_no
+               FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . '
+              WHERE sale_ledger_id = %d
+              ORDER BY local_viettel_invoice_id DESC LIMIT 1',
+            $sale_id
+        ), ARRAY_A);
+        if (empty($inv)) {
+            return ['success' => false, 'message' => 'Phiếu này chưa có hoá đơn Viettel để thay thế.'];
+        }
+        $old_no = (string) ($inv['viettel_invoice_no'] ?? '');
+        if ($old_no !== '' && strcasecmp($old_no, $new_invoice_no) === 0) {
+            return ['success' => false, 'message' => 'Số hoá đơn thay thế trùng số hiện tại — không cần cập nhật.'];
+        }
+
+        $this->ensure_table();
+        $now = current_time('mysql');
+        $wpdb->insert($this->table(), [
+            'blog_id' => get_current_blog_id(),
+            'sale_ledger_id' => $sale_id,
+            'original_invoice_record_id' => (int) $inv['local_viettel_invoice_id'],
+            'replacement_invoice_record_id' => 0,
+            'status' => 'manual_import',
+            'attempt_count' => 0,
+            'transaction_uuid' => '',
+            'original_invoice_no' => $old_no,
+            'replacement_invoice_no' => $new_invoice_no,
+            'reason' => 'Nhập tay số hoá đơn thay thế từ Viettel (kế toán đã lập trên portal).',
+            'created_by' => (int) $created_by,
+            'created_at' => $now,
+            'updated_at' => $now,
+            'processed_at' => $now,
+        ]);
+
+        // Gắn số mới vào phiếu -> push VAT HTsoft / data VAT sẽ dùng số này.
+        $wpdb->update(
+            TGS_TABLE_LOCAL_VIETTEL_INVOICE,
+            ['viettel_invoice_no' => $new_invoice_no, 'updated_at' => $now],
+            ['local_viettel_invoice_id' => (int) $inv['local_viettel_invoice_id']]
+        );
+
+        return [
+            'success' => true,
+            'message' => 'Đã gắn hoá đơn thay thế ' . $new_invoice_no . ' cho phiếu' . ($old_no !== '' ? ' (thay cho ' . $old_no . ')' : '') . '.',
+            'old_no'  => $old_no,
+            'new_no'  => $new_invoice_no,
+        ];
+    }
+
     /* ═══════════════════════════════════════════════════════════════════════
      * ĐIỂM VÀO (từ tgs-bc-tk, sau switch_to_blog)
      * ═══════════════════════════════════════════════════════════════════════ */

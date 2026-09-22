@@ -96,6 +96,7 @@ class TGS_Viettel_Invoice_Plugin
         add_action('wp_ajax_nopriv_tgs_viettel_send_from_sale', [$this, 'ajax_send_from_sale']);
         add_action('wp_ajax_tgs_viettel_pos_retry_invoice', [$this, 'ajax_pos_retry_invoice']);
         add_action('wp_ajax_tgs_viettel_pos_recover_invoice_no', [$this, 'ajax_pos_recover_invoice_no']);
+        add_action('wp_ajax_tgs_viettel_pos_import_replacement', [$this, 'ajax_pos_import_replacement']);
         add_action('wp_ajax_nopriv_tgs_viettel_pos_retry_invoice', [$this, 'ajax_pos_retry_invoice']);
         add_action('wp_ajax_tgs_viettel_pos_send_invoice_email', [$this, 'ajax_pos_send_invoice_email']);
         add_action('wp_ajax_nopriv_tgs_viettel_pos_send_invoice_email', [$this, 'ajax_pos_send_invoice_email']);
@@ -1009,6 +1010,22 @@ class TGS_Viettel_Invoice_Plugin
             : 'Z';
         $promo_suffix_sql = esc_sql($promo_suffix);
 
+        // Ghi chú "đã thay thế cho HĐ …" — lấy số HĐ GỐC từ log thay thế nhập tay.
+        $tgs_repl_table = '';
+        if (class_exists('TGS_Viettel_Invoice_Clusters')) {
+            $tgs_tbls = TGS_Viettel_Invoice_Clusters::instance()->tables();
+            $tgs_repl_table = (string) ($tgs_tbls['replacements'] ?? '');
+        }
+        if ($tgs_repl_table === '') {
+            $tgs_repl_table = $wpdb->base_prefix . 'tgs_viettel_invoice_replacements';
+        }
+        $tgs_has_repl = ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $tgs_repl_table)) === $tgs_repl_table);
+        $repl_select = $tgs_has_repl
+            ? "(SELECT r.original_invoice_no FROM `" . esc_sql($tgs_repl_table) . "` r
+                 WHERE r.sale_ledger_id = l.local_ledger_id AND r.status = 'manual_import'
+                 ORDER BY r.id DESC LIMIT 1)"
+            : "''";
+
         $sql = "SELECT
                     l.local_ledger_id AS sale_ledger_id,
                     l.local_ledger_code,
@@ -1036,6 +1053,7 @@ class TGS_Viettel_Invoice_Plugin
                     vi.total_tax_amount,
                     vi.total_after_tax,
                     vi.issue_response_payload,
+                    {$repl_select} AS replaced_from_no,
                     COALESCE(vi.updated_at, l.updated_at) AS updated_at,
                     COALESCE(vi.created_at, l.created_at) AS created_at
                 FROM " . TGS_TABLE_LOCAL_LEDGER . " l
@@ -2344,6 +2362,46 @@ class TGS_Viettel_Invoice_Plugin
             'cqt_ok'     => true,
             'sale_ledger_id' => $sale_ledger_id,
         ]);
+    }
+
+    /**
+     * POS: NHẬP TAY số hoá đơn thay thế (kế toán đã lập thay thế trên portal Viettel).
+     * Gắn số mới vào phiếu + lưu log, để đẩy VAT HTsoft / data VAT dùng đúng số mới.
+     * Có mật khẩu chặt (Thuy!@#) để tránh bấm nhầm.
+     */
+    public function ajax_pos_import_replacement()
+    {
+        $this->bootstrap_requested_blog_context();
+        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+        if (empty($nonce) || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+            return;
+        }
+        if (!$this->current_user_can_use_pos()) {
+            wp_send_json_error(['message' => 'Bạn không có quyền thao tác.'], 403);
+            return;
+        }
+        if ((string) ($_POST['password'] ?? '') !== 'Thuy!@#') {
+            wp_send_json_error(['message' => 'Mật khẩu không đúng.'], 403);
+            return;
+        }
+        $sale_ledger_id = intval($_POST['sale_ledger_id'] ?? 0);
+        $new_no = sanitize_text_field($_POST['replacement_invoice_no'] ?? '');
+        if ($sale_ledger_id <= 0 || $new_no === '') {
+            wp_send_json_error(['message' => 'Thiếu phiếu hoặc số hoá đơn thay thế.'], 400);
+            return;
+        }
+        if (!class_exists('TGS_Viettel_Invoice_Replacement')) {
+            wp_send_json_error(['message' => 'Chưa nạp module hoá đơn thay thế.'], 500);
+            return;
+        }
+        $res = TGS_Viettel_Invoice_Replacement::instance($this)
+            ->record_manual_replacement($sale_ledger_id, $new_no, get_current_user_id());
+        if (empty($res['success'])) {
+            wp_send_json_error(['message' => $res['message'] ?? 'Không gắn được hoá đơn thay thế.'], 400);
+            return;
+        }
+        wp_send_json_success($res);
     }
 
     /**

@@ -772,6 +772,43 @@ class TGS_Viettel_Invoice_Flow_Service
         return $api_price;
     }
 
+    /**
+     * THÀNH TIỀN GỒM THUẾ của một dòng — ĐÚNG cách bán hàng chốt (làm tròn ở ĐVT BÁN),
+     * để hoá đơn thuế + báo cáo VAT neo vào cùng con số khách thật trả.
+     *
+     * Sao chép NGUYÊN công thức của class-tgs-pos-htsoft-invoice-push::build_lines:
+     *   dg_sale   = round(giá_chưa_thuế × rate × (1+thuế%))     // giá gồm thuế / ĐVT bán
+     *   sale_qty  = SL_ĐVCB / rate
+     *   consumer  = round(giá_chưa_thuế × SL_ĐVCB − CK + thuế_đã_lưu)
+     *   ck_sale   = max(0, round(dg_sale × sale_qty − consumer))
+     *   thành tiền = dg_sale × sale_qty − ck_sale
+     *
+     * @param float $sl_base      SL theo ĐVCB (đơn vị nhỏ nhất)
+     * @param float $price_pretax Đơn giá CHƯA thuế / ĐVCB, TRƯỚC chiết khấu
+     * @param float $ck_pretax    Chiết khấu cả dòng, trước thuế
+     * @param float $tax_amount   Tiền thuế ĐÃ LƯU lúc bán (cả dòng)
+     * @param float $tax_pct      Thuế suất %
+     * @param float $rate         Tỉ lệ quy đổi ĐVT bán → ĐVCB (unit_ratio)
+     * @return float
+     */
+    public static function sale_line_total($sl_base, $price_pretax, $ck_pretax, $tax_amount, $tax_pct, $rate)
+    {
+        $sl_base = max(0.0, (float) $sl_base);
+        $price   = max(0.0, (float) $price_pretax);
+        $ck      = max(0.0, (float) $ck_pretax);
+        $tax_amt = max(0.0, (float) $tax_amount);
+        $tax     = max(0.0, (float) $tax_pct);
+        $rate    = (float) $rate;
+        if ($rate <= 0) {
+            $rate = 1.0;
+        }
+        $consumer = round($price * $sl_base - $ck + $tax_amt);
+        $dg_sale  = round($price * $rate * (1 + $tax / 100));
+        $sale_qty = $rate != 0 ? ($sl_base / $rate) : $sl_base;
+        $ck_sale  = max(0.0, round($dg_sale * $sale_qty - $consumer));
+        return max(0.0, $dg_sale * $sale_qty - $ck_sale);
+    }
+
     public static function api_line_amounts($quantity, $unit_price, $with_tax, $tax_percent)
     {
         $quantity = max(0.0, (float) $quantity);
@@ -1303,6 +1340,26 @@ class TGS_Viettel_Invoice_Flow_Service
                 ? max(0.0, $line_amount / $base_qty)
                 : max(0.0, (float) $line['don_gia_gui_thue']);
 
+            /*
+             * ─── THÀNH TIỀN DÒNG = ĐÚNG SỐ BÁN HÀNG CHỐT (build_lines) ───────
+             *
+             * Bán hàng làm tròn giá gồm thuế ở ĐVT BÁN rồi × SL bán:
+             *   dg_sale = round(giá_chưa_thuế × rate × (1+thuế%))
+             *   thành tiền = dg_sale × (SL_ĐVCB / rate) − CK
+             * Khác với dựng lại ở ĐVCB (round(giá×SL − CK + thuế)) đúng tới 1đ
+             * mỗi khi giá/ĐVT bán không chia chẵn cho (1+thuế%). Hoá đơn thuế PHẢI
+             * bằng ĐÚNG số khách trả nên NEO vào con số này (xem
+             * class-tgs-pos-htsoft-invoice-push::build_lines — cùng công thức).
+             */
+            $sale_line_total = self::sale_line_total(
+                $item['quantity'] ?? 0,
+                $item['price'] ?? 0,
+                $item['local_ledger_item_discount_amount'] ?? 0,
+                $item['local_ledger_item_tax_amount'] ?? 0,
+                self::tax_percent_of($item['local_ledger_item_tax_percent'] ?? null),
+                $item['local_ledger_item_unit_ratio'] ?? 1
+            );
+
             $gift_meta = $this->extract_gift_meta($item['local_ledger_item_meta'] ?? '');
             $source_items[] = [
                 'ledger_item_id' => intval($item['local_ledger_item_id']),
@@ -1344,6 +1401,8 @@ class TGS_Viettel_Invoice_Flow_Service
                  */
                 'discount_percent' => (float) $line['ck_phan_tram'],
                 'line_total' => (float) $line['tien_hang_sau_ck'],
+                // Thành tiền dòng ĐÚNG như bán hàng chốt (neo cho hoá đơn thuế).
+                'sale_line_total' => (float) $sale_line_total,
                 'tax_percent' => self::tax_percent_of($item['local_ledger_item_tax_percent'] ?? null),
                 // KCT khác mức 0% — xem tgs_shop_management/docs/quan-ly-thue-suat.md
                 'is_kct' => (int) ($item['local_ledger_item_is_kct'] ?? 0) === 1 ? 1 : 0,
@@ -1675,9 +1734,16 @@ class TGS_Viettel_Invoice_Flow_Service
              */
             $stored_tax_raw  = (float) ($item['stored_tax_amount'] ?? 0);
             $so_sach_without = max(0, (int) round($line['tien_hang_sau_ck']));
-            $tien_khach_tra  = $stored_tax_raw > 0
-                ? max(0, (int) round($line['tien_hang_sau_ck'] + $stored_tax_raw))
-                : max(0, (int) round($line['thanh_tien']));
+            /*
+             * NEO VÀO THÀNH TIỀN BÁN (làm tròn ở ĐVT bán, đúng build_lines) để hoá
+             * đơn thuế = số khách thật trả; api_line_amounts() suy chưa-thuế/thuế từ
+             * đây (thuế = thành tiền − chưa thuế). Fallback về cách cũ khi thiếu.
+             */
+            $tien_khach_tra  = isset($item['sale_line_total'])
+                ? max(0, (int) round((float) $item['sale_line_total']))
+                : ($stored_tax_raw > 0
+                    ? max(0, (int) round($line['tien_hang_sau_ck'] + $stored_tax_raw))
+                    : max(0, (int) round($line['thanh_tien'])));
             $so_sach_tax     = max(0, $tien_khach_tra - $so_sach_without);
 
             /*

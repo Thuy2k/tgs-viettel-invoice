@@ -32,6 +32,12 @@ if (file_exists($tgs_viettel_clusters_file)) {
     require_once $tgs_viettel_clusters_file;
 }
 
+// Cấu hình gửi email hóa đơn theo từng website (bật/tắt + kênh SMTP/Viettel).
+$tgs_viettel_mail_config_file = TGS_VIETTEL_INVOICE_PLUGIN_DIR . 'includes/class-tgs-viettel-mail-config.php';
+if (file_exists($tgs_viettel_mail_config_file)) {
+    require_once $tgs_viettel_mail_config_file;
+}
+
 $tgs_viettel_return_adjustment_file = TGS_VIETTEL_INVOICE_PLUGIN_DIR . 'includes/class-tgs-viettel-invoice-return-adjustment.php';
 if (file_exists($tgs_viettel_return_adjustment_file)) {
     require_once $tgs_viettel_return_adjustment_file;
@@ -255,6 +261,7 @@ class TGS_Viettel_Invoice_Plugin
         $routes['viettel-invoice-create'] = ['Viettel Invoice', TGS_VIETTEL_INVOICE_PLUGIN_DIR . 'admin-views/create-invoice.php'];
         $routes['viettel-invoice-settings'] = ['Cấu hình Viettel Invoice', TGS_VIETTEL_INVOICE_PLUGIN_DIR . 'admin-views/settings.php'];
         $routes['viettel-invoice-guide'] = ['Luồng Viettel Invoice', TGS_VIETTEL_INVOICE_PLUGIN_DIR . 'admin-views/flow-guide.php'];
+        $routes['viettel-mail-settings'] = ['Cài đặt gửi mail', TGS_VIETTEL_INVOICE_PLUGIN_DIR . 'admin-views/mail-settings.php'];
 
         return $routes;
     }
@@ -264,6 +271,7 @@ class TGS_Viettel_Invoice_Plugin
         $items = [
             'viettel-invoice-create' => ['bx bx-receipt text-primary me-1', 'Viettel Invoice'],
             'viettel-invoice-settings' => ['bx bx-cog text-warning me-1', 'Cấu hình Viettel Invoice'],
+            'viettel-mail-settings' => ['bx bx-envelope text-success me-1', 'Cài đặt gửi mail'],
             // [ẨN MENU - 2026-06-02] Hướng dẫn luồng - không dùng nữa
             // 'viettel-invoice-guide' => ['bx bx-book-content text-info me-1', 'Hướng dẫn luồng'],
         ];
@@ -2392,7 +2400,7 @@ class TGS_Viettel_Invoice_Plugin
         $created_by = get_current_user_id();
         $latest = $wpdb->get_row(
             $wpdb->prepare(
-                'SELECT local_viettel_invoice_id, sale_ledger_id, local_ledger_code, invoice_state, template_code, viettel_invoice_no, issue_response_payload
+                'SELECT local_viettel_invoice_id, sale_ledger_id, local_ledger_code, invoice_state, template_code, viettel_invoice_no, issue_response_payload, issue_transaction_uuid, issue_request_payload
                  FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . '
                  WHERE sale_ledger_id = %d
                  ORDER BY local_viettel_invoice_id DESC
@@ -2432,6 +2440,67 @@ class TGS_Viettel_Invoice_Plugin
         $supplier_tax_code = sanitize_text_field($settings['supplier_tax_code'] ?? '');
         if ($supplier_tax_code === '') {
             wp_send_json_error(['message' => 'Thiếu MST nhà cung cấp trong cấu hình Viettel.'], 400);
+            return;
+        }
+
+        /*
+         * ─── CẤU HÌNH GỬI EMAIL THEO TỪNG WEBSITE ───────────────────────────
+         * Site CHƯA bật -> chặn (không gửi khách). Bật rồi -> chọn kênh:
+         *   viettel: Viettel tự gửi mail (sendHtmlMailProcess) tới email trên hóa đơn.
+         *   smtp   : luồng wp_mail + PDF đính kèm bên dưới (mặc định, như cũ).
+         * Cấu hình ở trang Quản trị → "Cài đặt gửi mail".
+         */
+        $tgs_mail_cfg = class_exists('TGS_Viettel_Mail_Config')
+            ? TGS_Viettel_Mail_Config::get()
+            : ['enabled' => true, 'mode' => 'smtp']; // thiếu class -> giữ hành vi cũ
+        if (empty($tgs_mail_cfg['enabled'])) {
+            wp_send_json_error([
+                'message' => 'Website này CHƯA bật gửi email hóa đơn. Vào Quản trị → "Cài đặt gửi mail" để bật cho website này.',
+            ], 400);
+            return;
+        }
+
+        if ($tgs_mail_cfg['mode'] === 'viettel') {
+            // sendHtmlMailProcess CHỈ tra được theo transactionUuid do client tự sinh lúc
+            // createInvoice (KHÔNG phải transactionID Viettel trả về). Lấy từ payload phát hành.
+            $mail_tx_uuid = '';
+            $mail_req_json = json_decode((string) ($latest['issue_request_payload'] ?? ''), true);
+            if (is_array($mail_req_json)) {
+                $mail_tx_uuid = (string) ($mail_req_json['generalInvoiceInfo']['transactionUuid'] ?? '');
+            }
+            $mail_tx_uuid = sanitize_text_field($mail_tx_uuid);
+            if ($mail_tx_uuid === '') {
+                wp_send_json_error(['message' => 'Hóa đơn này không có transactionUuid (phát hành trước bản cập nhật) nên không gửi mail qua API Viettel được. Hãy dùng kênh SMTP cho hóa đơn cũ, hoặc phát hành hóa đơn mới.'], 400);
+                return;
+            }
+            $mail_res = $this->send_html_mail_via_viettel($settings, $supplier_tax_code, $mail_tx_uuid);
+            $this->insert_log_record([
+                'invoice_id' => intval($latest['local_viettel_invoice_id'] ?? 0),
+                'sale_ledger_id' => $sale_ledger_id,
+                'local_ledger_code' => sanitize_text_field($latest['local_ledger_code'] ?? ''),
+                'step_name' => 'send_invoice_email',
+                'action_name' => 'send_invoice_email_viettel',
+                'endpoint' => untrailingslashit($settings['api_base_url'] ?? '') . '/InvoiceAPI/InvoiceUtilsWS/sendHtmlMailProcess',
+                'request_payload' => wp_json_encode([
+                    'supplierTaxCode' => $supplier_tax_code,
+                    'lstTransactionUuid' => $mail_tx_uuid,
+                ], JSON_UNESCAPED_UNICODE),
+                'response_payload' => (string) ($mail_res['response_text'] ?? ''),
+                'http_code' => intval($mail_res['http_code'] ?? 0),
+                'error_message' => empty($mail_res['success']) ? sanitize_text_field($mail_res['message'] ?? 'Gửi mail Viettel thất bại.') : '',
+                'created_by' => $created_by,
+            ]);
+            if (empty($mail_res['success'])) {
+                wp_send_json_error([
+                    'message' => 'Gửi email qua API Viettel thất bại: ' . ($mail_res['message'] ?? 'lỗi không rõ'),
+                    'http_code' => intval($mail_res['http_code'] ?? 0),
+                ], 400);
+                return;
+            }
+            wp_send_json_success([
+                'message' => 'Đã yêu cầu Viettel gửi email hóa đơn tới địa chỉ email trên hóa đơn.',
+                'channel' => 'viettel',
+            ]);
             return;
         }
 
@@ -2727,7 +2796,7 @@ class TGS_Viettel_Invoice_Plugin
         $created_by = get_current_user_id();
         $latest = $wpdb->get_row(
             $wpdb->prepare(
-                'SELECT local_viettel_invoice_id, sale_ledger_id, local_ledger_code, invoice_state, template_code, viettel_invoice_no, issue_response_payload
+                'SELECT local_viettel_invoice_id, sale_ledger_id, local_ledger_code, invoice_state, template_code, viettel_invoice_no, issue_response_payload, issue_transaction_uuid, issue_request_payload
                  FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . '
                  WHERE sale_ledger_id = %d
                  ORDER BY local_viettel_invoice_id DESC
@@ -2930,6 +2999,82 @@ class TGS_Viettel_Invoice_Plugin
         ]);
     }
 
+    /**
+     * Gọi API Viettel sendHtmlMailProcess — Viettel tự gửi email hóa đơn HTML tới
+     * địa chỉ email đã ghi trên hóa đơn. Dùng cho chế độ "viettel" ở "Cài đặt gửi mail".
+     *
+     * Body: {"supplierTaxCode":"...","lstTransactionUuid":"<uuid>"}
+     * Auth: Bearer (access_token) hoặc Basic (username:password) — theo cấu hình site.
+     *
+     * @return array ['success'=>bool,'http_code'=>int,'response_text'=>string,'message'=>string]
+     */
+    private function send_html_mail_via_viettel(array $settings, $supplier_tax_code, $transaction_uuid)
+    {
+        $base = untrailingslashit((string) ($settings['api_base_url'] ?? ''));
+        if ($base === '') {
+            $base = 'https://api-vinvoice.viettel.vn/services/einvoiceapplication/api';
+        }
+        $url = $base . '/InvoiceAPI/InvoiceUtilsWS/sendHtmlMailProcess';
+
+        $headers = [
+            'Content-Type' => 'application/json',
+            // Giữ keep-alive + HTTP/1.1: OpenSSL 3.0 hay lỗi 56 nếu thiếu (như các call Viettel khác).
+            'Connection'   => 'keep-alive',
+        ];
+        $auth_mode = $settings['auth_mode'] ?? 'basic';
+        if ($auth_mode === 'bearer' && !empty($settings['access_token'])) {
+            $headers['Authorization'] = 'Bearer ' . $settings['access_token'];
+        } else {
+            $headers['Authorization'] = 'Basic ' . base64_encode(($settings['username'] ?? '') . ':' . ($settings['password'] ?? ''));
+        }
+
+        $body = wp_json_encode([
+            'supplierTaxCode'    => (string) $supplier_tax_code,
+            'lstTransactionUuid' => (string) $transaction_uuid,
+        ], JSON_UNESCAPED_UNICODE);
+
+        $response = wp_remote_post($url, [
+            'method'      => 'POST',
+            'timeout'     => 45,
+            'httpversion' => '1.1',
+            'sslverify'   => !empty($settings['verify_ssl']),
+            'headers'     => $headers,
+            'body'        => $body,
+        ]);
+
+        if (is_wp_error($response)) {
+            return [
+                'success'       => false,
+                'http_code'     => 0,
+                'response_text' => $response->get_error_message(),
+                'message'       => 'Không gọi được API Viettel: ' . $response->get_error_message(),
+            ];
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        $text = (string) wp_remote_retrieve_body($response);
+
+        // 2xx = gọi thành công. Viettel có thể trả JSON kèm errorCode -> soi thêm cho chắc.
+        $ok = ($code >= 200 && $code < 300);
+        if ($ok && $text !== '') {
+            $json = json_decode($text, true);
+            if (is_array($json)) {
+                $err = $json['errorCode'] ?? ($json['error'] ?? null);
+                // errorCode rỗng/0/null coi là OK; có mã lỗi thật -> fail.
+                if (!empty($err) && $err !== '0' && strtolower((string) $err) !== 'success') {
+                    $ok = false;
+                }
+            }
+        }
+
+        return [
+            'success'       => $ok,
+            'http_code'     => $code,
+            'response_text' => $text,
+            'message'       => $ok ? 'OK' : ('Viettel trả HTTP ' . $code . ($text !== '' ? ' — ' . mb_substr($text, 0, 300) : '')),
+        ];
+    }
+
     private function fetch_invoice_representation_file(array $settings, $supplier_tax_code, $invoice_no, $template_code, $file_type = 'PDF')
     {
         $base = untrailingslashit($settings['api_base_url'] ?? '');
@@ -3062,6 +3207,31 @@ class TGS_Viettel_Invoice_Plugin
                 @unlink($file);
             }
         }
+    }
+
+    /**
+     * Bảo đảm payload createInvoice có transactionUuid do CLIENT tự sinh (thay cho null).
+     *
+     * Vì sao: API gửi mail sendHtmlMailProcess CHỈ tra hóa đơn theo transactionUuid client
+     * gửi lúc phát hành — KHÔNG dùng transactionID Viettel trả về. Trước đây gửi null nên
+     * không hóa đơn nào gửi mail được. Sinh 1 uuid duy nhất/lần phát hành (đồng thời giúp
+     * chống phát hành trùng khi retry). CHỈ set khi đang trống; đã có thì giữ nguyên.
+     *
+     * @return string uuid cuối cùng (rỗng nếu payload không có generalInvoiceInfo).
+     */
+    private function ensure_issue_transaction_uuid(array &$payload)
+    {
+        if (!isset($payload['generalInvoiceInfo']) || !is_array($payload['generalInvoiceInfo'])) {
+            return '';
+        }
+        $cur = $payload['generalInvoiceInfo']['transactionUuid'] ?? null;
+        if (is_string($cur) && trim($cur) !== '') {
+            return $cur;
+        }
+        $seed = function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : uniqid('', true);
+        $uuid = 'BT' . strtoupper(preg_replace('/[^a-zA-Z0-9]/', '', $seed)); // <=100 ký tự, chuỗi an toàn
+        $payload['generalInvoiceInfo']['transactionUuid'] = $uuid;
+        return $uuid;
     }
 
     private function submit_invoice_payload($payload, $mode, $context = [])
@@ -3963,6 +4133,8 @@ class TGS_Viettel_Invoice_Plugin
 
             $issue_payload = $issue_payload_result['payload'];
             $issue_payload['local_ledger_code'] = sanitize_text_field($filtered_payload['sale_code'] ?? '');
+            // Tự sinh transactionUuid (thay null) để về sau gửi mail qua API Viettel được.
+            $this->ensure_issue_transaction_uuid($issue_payload);
 
             $created_by = get_current_user_id();
             $tracking_id = $this->create_auto_flow_tracking(
@@ -4394,6 +4566,8 @@ class TGS_Viettel_Invoice_Plugin
 
         $issue_payload = $issue_payload_result['payload'];
         $issue_payload['local_ledger_code'] = sanitize_text_field($filtered_payload['sale_code'] ?? '');
+        // Tự sinh transactionUuid (thay null) để về sau gửi mail qua API Viettel được.
+        $this->ensure_issue_transaction_uuid($issue_payload);
 
         $issue_result = $this->submit_invoice_payload($issue_payload, 'issue', [
             'skip_persist' => true,

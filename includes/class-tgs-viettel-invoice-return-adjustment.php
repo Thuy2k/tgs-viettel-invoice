@@ -722,7 +722,12 @@ class TGS_Viettel_Invoice_Return_Adjustment
             $ty_le_hoan = $source_qty > 0 ? ($quantity / $source_qty) : 0.0;
 
             if ($source_tax > 0 && $ty_le_hoan > 0) {
-                $source_line_total = floatval($source['line_total'] ?? 0) + $source_tax;
+                // Neo vào THÀNH TIỀN dòng của hoá đơn GỐC (sale_line_total — làm tròn ở ĐVT
+                // bán) để điều chỉnh giảm khớp ĐÚNG hoá đơn gốc. Snapshot của hoá đơn phát
+                // hành sau bản vá đã có field này; đơn cũ (thiếu) rơi về cách cũ.
+                $source_line_total = isset($source['sale_line_total'])
+                    ? floatval($source['sale_line_total'])
+                    : (floatval($source['line_total'] ?? 0) + $source_tax);
                 $with_tax = max(0, (int) round($source_line_total * $ty_le_hoan));
             } else {
                 $with_tax = max(0, (int) round($money_line['thanh_tien']));

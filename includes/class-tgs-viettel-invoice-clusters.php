@@ -443,6 +443,8 @@ class TGS_Viettel_Invoice_Clusters
             $result['has_password'] = !empty($secrets['password']);
             $result['has_access_token'] = !empty($secrets['access_token']);
             $result['username'] = (string) ($secrets['username'] ?? '');
+            $result['portal_username'] = (string) ($secrets['portal_username'] ?? '');
+            $result['has_portal_password'] = !empty($secrets['portal_password']);
         } else {
             $result['template_code'] = (string) ($settings['default_template_code'] ?? '');
             $result['invoice_series'] = (string) ($settings['default_invoice_series'] ?? '');
@@ -505,6 +507,9 @@ class TGS_Viettel_Invoice_Clusters
             'default_payment_method' => sanitize_text_field($raw['default_payment_method'] ?? ''),
             'auto_enabled' => !empty($raw['auto_enabled']) ? 1 : 0,
             'auto_mode' => in_array(($raw['auto_mode'] ?? ''), ['draft', 'issue'], true) ? $raw['auto_mode'] : 'issue',
+            // Gửi email ĐA ĐỊA CHỈ qua portal Viettel (per-CỤM: nhiều site chung 1 tài khoản portal).
+            'portal_enabled' => !empty($raw['portal_enabled']) ? 1 : 0,
+            'portal_supplier_id' => sanitize_text_field($raw['portal_supplier_id'] ?? ''),
         ];
     }
 
@@ -551,6 +556,9 @@ class TGS_Viettel_Invoice_Clusters
             'username' => sanitize_text_field($raw['username'] ?? ($existing_secrets['username'] ?? '')),
             'password' => (($raw['password'] ?? '') === '' || ($raw['password'] ?? '') === '********') ? ($existing_secrets['password'] ?? '') : (string) $raw['password'],
             'access_token' => (($raw['access_token'] ?? '') === '' || ($raw['access_token'] ?? '') === '********') ? ($existing_secrets['access_token'] ?? '') : (string) $raw['access_token'],
+            // Tài khoản portal Viettel (…_QT) — dùng cho gửi email đa địa chỉ, chung cả cụm.
+            'portal_username' => sanitize_text_field($raw['portal_username'] ?? ($existing_secrets['portal_username'] ?? '')),
+            'portal_password' => (($raw['portal_password'] ?? '') === '' || ($raw['portal_password'] ?? '') === '********') ? ($existing_secrets['portal_password'] ?? '') : (string) $raw['portal_password'],
         ];
         $data = [
             'code' => sanitize_key($raw['code'] ?? ''),

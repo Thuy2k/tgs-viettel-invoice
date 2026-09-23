@@ -114,6 +114,25 @@ $can_manage_clusters = $cluster_manager && $cluster_manager->can_manage_all();
                     <option value="issue">Phát hành và gửi CQT</option>
                     <option value="draft">Tạo nháp</option>
                 </select></div>
+            <div class="col-12 vi-section-heading"><strong>Gửi email đa địa chỉ (portal Viettel)</strong>
+                <div class="small text-muted">Nút "Gửi email" ở màn Kiểm tra gửi thuế gửi hóa đơn tới bất kỳ email nào
+                    qua portal <code>vinvoice.viettel.vn</code> (đúng định dạng hóa đơn chính thức). Tài khoản portal
+                    dùng CHUNG cho mọi shop trong cụm này.</div>
+            </div>
+            <div class="col-12">
+                <div class="form-check"><input class="form-check-input" type="checkbox" id="vic_portal_enabled">
+                    <label class="form-check-label" for="vic_portal_enabled">Bật gửi email đa địa chỉ qua portal cho cụm này</label>
+                </div>
+            </div>
+            <div class="col-md-4"><label class="form-label">Tài khoản portal</label><input class="form-control"
+                    id="vic_portal_username" autocomplete="off" placeholder="vd: 0106933743-026_QT"></div>
+            <div class="col-md-4"><label class="form-label">Mật khẩu portal</label><input type="password"
+                    class="form-control" id="vic_portal_password" autocomplete="new-password"
+                    placeholder="Để trống để giữ nguyên"></div>
+            <div class="col-md-4"><label class="form-label">Supplier ID (nội bộ)</label><input class="form-control"
+                    id="vic_portal_supplier_id" placeholder="vd: 102668">
+                <div class="small text-muted">Lấy ở URL tìm hóa đơn trên portal: <code>supplierId.equals=…</code></div>
+            </div>
             <div class="col-12 vi-section-heading" id="vic-step-shops"><strong>Shop thuộc cụm</strong></div>
             <div class="col-12"><input class="form-control" id="vic_shop_search"
                     placeholder="Tìm theo tên, ID, domain...">

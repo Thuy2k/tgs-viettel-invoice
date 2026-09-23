@@ -62,7 +62,7 @@
         $('#vi-cluster-editor input:not([type]), #vi-cluster-editor input[type=text], #vi-cluster-editor input[type=password], #vi-cluster-editor textarea').val('');
         $('#vic_id,#vic_version').val('0');
         $('#vic_status').val('draft'); $('#vic_auth_mode').val('basic'); $('#vic_auto_mode').val('issue');
-        $('#vic_verify_ssl').prop('checked', true); $('#vic_auto_enabled').prop('checked', false);
+        $('#vic_verify_ssl').prop('checked', true); $('#vic_auto_enabled').prop('checked', false); $('#vic_portal_enabled').prop('checked', false);
         $('#vic_api_base_url').val('https://api-vinvoice.viettel.vn/services/einvoiceapplication/api');
         $('#vic_template_code').val('1/770'); $('#vic_invoice_series').val('K23TXM'); $('#vic_payment_method').val('TM/CK');
         $('#vic_shop_results,#vic_selected_shops').empty();
@@ -178,7 +178,8 @@
             code: $('#vic_code').val(), name: $('#vic_name').val(), status: $('#vic_status').val(), config_version: $('#vic_version').val(),
             supplier_tax_code: $('#vic_tax_code').val(), legal_name: $('#vic_legal_name').val(), legal_address: $('#vic_legal_address').val(), legal_phone: $('#vic_legal_phone').val(),
             api_base_url: $('#vic_api_base_url').val(), auth_mode: $('#vic_auth_mode').val(), username: $('#vic_username').val(), password: $('#vic_password').val(), access_token: $('#vic_access_token').val(), verify_ssl: $('#vic_verify_ssl').is(':checked') ? 1 : 0,
-            default_template_code: $('#vic_template_code').val(), default_invoice_series: $('#vic_invoice_series').val(), default_payment_method: $('#vic_payment_method').val(), auto_enabled: $('#vic_auto_enabled').is(':checked') ? 1 : 0, auto_mode: $('#vic_auto_mode').val()
+            default_template_code: $('#vic_template_code').val(), default_invoice_series: $('#vic_invoice_series').val(), default_payment_method: $('#vic_payment_method').val(), auto_enabled: $('#vic_auto_enabled').is(':checked') ? 1 : 0, auto_mode: $('#vic_auto_mode').val(),
+            portal_enabled: $('#vic_portal_enabled').is(':checked') ? 1 : 0, portal_username: $('#vic_portal_username').val(), portal_password: $('#vic_portal_password').val(), portal_supplier_id: $('#vic_portal_supplier_id').val()
         };
     }
 
@@ -218,6 +219,7 @@
             $('#vic_api_base_url').val(s.api_base_url); $('#vic_auth_mode').val(s.auth_mode); $('#vic_username').val(d.username); $('#vic_verify_ssl').prop('checked', !!Number(s.verify_ssl));
             $('#vi-cluster-editor').data('has-password', !!d.has_password).data('has-token', !!d.has_access_token);
             $('#vic_template_code').val(s.default_template_code); $('#vic_invoice_series').val(s.default_invoice_series); $('#vic_payment_method').val(s.default_payment_method); $('#vic_auto_enabled').prop('checked', !!Number(s.auto_enabled)); $('#vic_auto_mode').val(s.auto_mode);
+            $('#vic_portal_enabled').prop('checked', !!Number(s.portal_enabled)); $('#vic_portal_username').val(d.portal_username || ''); $('#vic_portal_supplier_id').val(s.portal_supplier_id || '');
             (d.shop_ids || []).forEach(function (id) { selected[id] = { blog_id: id, name: '' }; });
             if ($('#vic_users').length) $('#vic_users').val((d.users || []).map(function (u) { return u.user_id + ':' + u.access_level; }).join(', '));
             $('#vi-cluster-editor-title').text('Sửa cụm: ' + d.name); $('#vi-cluster-test,#vi-cluster-deactivate').removeClass('d-none'); openEditor(); searchShops();

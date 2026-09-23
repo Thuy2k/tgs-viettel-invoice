@@ -39,9 +39,18 @@ class TGS_Viettel_Portal_Mailer
     // Cấu hình per-site
     // ────────────────────────────────────────────────────────────────────────
 
-    /** @return array{enabled:bool,username:string,supplier_id:string,password:string} */
+    /**
+     * Cấu hình portal cho SITE hiện tại. Ưu tiên cấu hình theo CỤM (nhiều site
+     * chung 1 tài khoản portal); nếu cụm chưa khai thì fallback option per-site cũ.
+     * @return array{enabled:bool,username:string,supplier_id:string,password:string,_scope:string}
+     */
     public static function get_config()
     {
+        $cluster = self::cluster_portal();
+        if ($cluster !== null && $cluster['username'] !== '') {
+            return $cluster;
+        }
+        // Fallback: cấu hình per-site cũ (option) — cho site đã khai trước khi chuyển sang cụm.
         $o = get_option(self::OPTION, []);
         if (!is_array($o)) {
             $o = [];
@@ -51,6 +60,33 @@ class TGS_Viettel_Portal_Mailer
             'username'    => (string) ($o['username'] ?? ''),
             'supplier_id' => (string) ($o['supplier_id'] ?? ''),
             'password'    => self::decrypt((string) ($o['password_enc'] ?? '')),
+            '_scope'      => 'b' . get_current_blog_id(),
+        ];
+    }
+
+    /** Đọc cấu hình portal từ CỤM của site hiện tại (qua resolver clusters). null nếu chưa gán cụm/chưa khai. */
+    private static function cluster_portal()
+    {
+        if (!class_exists('TGS_Viettel_Invoice_Clusters')) {
+            return null;
+        }
+        $s = TGS_Viettel_Invoice_Clusters::instance()->resolve(get_current_blog_id(), []);
+        if (!is_array($s) || empty($s['_cluster']['assigned'])) {
+            return null;
+        }
+        $username = (string) ($s['portal_username'] ?? '');
+        if ($username === '') {
+            return null;
+        }
+        $cid = (int) ($s['_cluster']['id'] ?? 0);
+        $ver = (int) ($s['_cluster']['config_version'] ?? 0);
+        return [
+            'enabled'     => !empty($s['portal_enabled']),
+            'username'    => $username,
+            'supplier_id' => (string) ($s['portal_supplier_id'] ?? ''),
+            'password'    => (string) ($s['portal_password'] ?? ''),
+            // Cache token theo CỤM + phiên bản cấu hình (đổi creds -> version tăng -> cache tự mới).
+            '_scope'      => 'c' . $cid . 'v' . $ver,
         ];
     }
 
@@ -118,24 +154,29 @@ class TGS_Viettel_Portal_Mailer
     // Portal client
     // ────────────────────────────────────────────────────────────────────────
 
-    private static function tok_transient_key()
+    private static function tok_transient_key($scope = '')
     {
-        return 'tgs_vt_portal_tok_' . get_current_blog_id();
+        if ($scope === '') {
+            $scope = 'b' . get_current_blog_id();
+        }
+        return 'tgs_vt_portal_tok_' . $scope;
     }
 
     /**
-     * Đăng nhập portal, cache token theo site.
+     * Đăng nhập portal, cache token theo CỤM (nhiều site chung 1 token) — hoặc theo
+     * site nếu dùng cấu hình per-site cũ. Scope lấy từ get_config()['_scope'].
      * @return array{ok:bool,token?:string,cluster?:string,message?:string}
      */
     public static function login($force = false)
     {
         $cfg = self::get_config();
         if ($cfg['username'] === '' || $cfg['password'] === '') {
-            return ['ok' => false, 'message' => 'Chưa cấu hình tài khoản portal Viettel cho site này (Cài đặt gửi mail → mục 3).'];
+            return ['ok' => false, 'message' => 'Chưa cấu hình tài khoản portal Viettel cho cụm của site này (Cấu hình cụm Viettel → "Gửi email đa địa chỉ").'];
         }
+        $key = self::tok_transient_key($cfg['_scope'] ?? '');
 
         if (!$force) {
-            $cached = get_transient(self::tok_transient_key());
+            $cached = get_transient($key);
             if (is_array($cached) && !empty($cached['token'])) {
                 return ['ok' => true, 'token' => $cached['token'], 'cluster' => $cached['cluster'] ?? 'cluster3'];
             }
@@ -179,7 +220,7 @@ class TGS_Viettel_Portal_Mailer
 
         $ttl = is_array($json) ? (int) ($json['expires_in'] ?? 1198) : 1198;
         $ttl = max(60, min(self::TOKEN_TTL, $ttl - 60));
-        set_transient(self::tok_transient_key(), ['token' => $token, 'cluster' => $cluster], $ttl);
+        set_transient($key, ['token' => $token, 'cluster' => $cluster], $ttl);
 
         return ['ok' => true, 'token' => $token, 'cluster' => $cluster];
     }

@@ -2867,7 +2867,7 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
         if (!TGS_Viettel_Portal_Mailer::is_enabled()) {
-            wp_send_json_error(['message' => 'Website này chưa bật "Gửi email đa địa chỉ (portal Viettel)". Vào Quản trị → "Cài đặt gửi mail" → mục 3 để bật + nhập tài khoản portal.'], 400);
+            wp_send_json_error(['message' => 'Cụm của shop này chưa bật "Gửi email đa địa chỉ (portal Viettel)". Vào Cấu hình cụm Viettel → mục "Gửi email đa địa chỉ" để bật + nhập tài khoản portal.'], 400);
             return;
         }
         if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {

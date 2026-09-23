@@ -16,6 +16,9 @@ if (!defined('ABSPATH')) {
 if (!class_exists('TGS_Viettel_Mail_Config')) {
     require_once TGS_VIETTEL_INVOICE_PLUGIN_DIR . 'includes/class-tgs-viettel-mail-config.php';
 }
+if (!class_exists('TGS_Viettel_Portal_Mailer')) {
+    require_once TGS_VIETTEL_INVOICE_PLUGIN_DIR . 'includes/class-tgs-viettel-portal-mailer.php';
+}
 
 $tgs_mail_notice = '';
 $tgs_mail_can_edit = current_user_can('manage_options') || current_user_can('manage_tgs_shop');
@@ -33,11 +36,21 @@ if (
         $enabled = !empty($_POST['tgs_mail_enabled']);
         $mode    = (isset($_POST['tgs_mail_mode']) && $_POST['tgs_mail_mode'] === 'viettel') ? 'viettel' : 'smtp';
         TGS_Viettel_Mail_Config::save($enabled, $mode);
+
+        // Cấu hình PORTAL (gửi đa địa chỉ) — lưu cùng lượt submit.
+        TGS_Viettel_Portal_Mailer::save_config(
+            !empty($_POST['tgs_portal_enabled']),
+            sanitize_text_field(wp_unslash($_POST['tgs_portal_username'] ?? '')),
+            (string) wp_unslash($_POST['tgs_portal_password'] ?? ''),
+            sanitize_text_field(wp_unslash($_POST['tgs_portal_supplier_id'] ?? ''))
+        );
+
         $tgs_mail_notice = '<div class="notice notice-success"><p><strong>Đã lưu.</strong> Cấu hình gửi email cho website này đã cập nhật.</p></div>';
     }
 }
 
-$tgs_mail_cfg  = TGS_Viettel_Mail_Config::get();
+$tgs_mail_cfg   = TGS_Viettel_Mail_Config::get();
+$tgs_portal_cfg = TGS_Viettel_Portal_Mailer::get_config();
 $tgs_site_name = get_bloginfo('name');
 $tgs_site_id   = get_current_blog_id();
 ?>
@@ -117,6 +130,52 @@ $tgs_site_id   = get_current_blog_id();
                 tới địa chỉ email ĐÃ ghi trên hóa đơn. Dùng khi đã tích hợp Viettel thật.
             </span>
         </label>
+
+        <hr style="border:none;border-top:1px solid #eef2f7;margin:18px 0;">
+
+        <h2 style="margin-top:0;font-size:16px;color:#0f172a;">3. Gửi email đa địa chỉ (portal Viettel)</h2>
+        <p style="color:#64748b;font-size:13px;margin:2px 0 12px;">
+            Cho phép nút <strong>“Gửi email (nhiều địa chỉ)”</strong> ở màn <em>Kiểm tra gửi thuế</em> gửi hóa đơn
+            tới <strong>bất kỳ email nào</strong> — dùng chính hệ thống <strong>portal Viettel</strong>
+            (<code>vinvoice.viettel.vn</code>) nên email đúng định dạng hóa đơn chính thức. Cần tài khoản đăng nhập
+            portal của shop này.
+        </p>
+
+        <label class="tgsw-box" style="display:flex;align-items:center;gap:14px;cursor:pointer;padding:6px 0;">
+            <span class="tgsw">
+                <input type="checkbox" name="tgs_portal_enabled" value="1" <?php checked($tgs_portal_cfg['enabled']); ?>>
+                <span class="track"></span><span class="knob"></span>
+            </span>
+            <span>
+                <strong>Bật gửi đa địa chỉ qua portal cho website này</strong>
+                <span class="tgsw-state" style="margin-left:8px;font-size:13px;">
+                    <span class="on">● ĐANG BẬT</span><span class="off">○ ĐANG TẮT</span>
+                </span>
+            </span>
+        </label>
+
+        <div style="display:grid;grid-template-columns:180px 1fr;gap:10px 14px;align-items:center;margin-top:12px;max-width:640px;">
+            <label style="font-weight:600;">Tài khoản portal</label>
+            <input type="text" name="tgs_portal_username" autocomplete="off"
+                   value="<?php echo esc_attr($tgs_portal_cfg['username']); ?>"
+                   placeholder="vd: 0106933743-026_QT" class="regular-text" style="width:100%;">
+
+            <label style="font-weight:600;">Mật khẩu portal</label>
+            <input type="password" name="tgs_portal_password" autocomplete="new-password"
+                   value="<?php echo $tgs_portal_cfg['password'] !== '' ? '********' : ''; ?>"
+                   placeholder="<?php echo $tgs_portal_cfg['password'] !== '' ? 'Đã lưu — để trống nếu không đổi' : 'Nhập mật khẩu đăng nhập portal'; ?>"
+                   class="regular-text" style="width:100%;">
+
+            <label style="font-weight:600;">Supplier ID (nội bộ)</label>
+            <span>
+                <input type="text" name="tgs_portal_supplier_id" autocomplete="off"
+                       value="<?php echo esc_attr($tgs_portal_cfg['supplier_id']); ?>"
+                       placeholder="vd: 102668" class="regular-text" style="width:180px;">
+                <span style="color:#94a3b8;font-size:12.5px;margin-left:8px;">
+                    Lấy ở URL tìm hóa đơn trên portal: <code>supplierId.equals=…</code>
+                </span>
+            </span>
+        </div>
 
         <div style="margin-top:22px;">
             <button type="submit" name="tgs_mail_cfg_submit" value="1"

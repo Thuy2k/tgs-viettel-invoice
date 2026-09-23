@@ -38,6 +38,11 @@ if (file_exists($tgs_viettel_mail_config_file)) {
     require_once $tgs_viettel_mail_config_file;
 }
 
+$tgs_viettel_portal_mailer_file = TGS_VIETTEL_INVOICE_PLUGIN_DIR . 'includes/class-tgs-viettel-portal-mailer.php';
+if (file_exists($tgs_viettel_portal_mailer_file)) {
+    require_once $tgs_viettel_portal_mailer_file;
+}
+
 $tgs_viettel_return_adjustment_file = TGS_VIETTEL_INVOICE_PLUGIN_DIR . 'includes/class-tgs-viettel-invoice-return-adjustment.php';
 if (file_exists($tgs_viettel_return_adjustment_file)) {
     require_once $tgs_viettel_return_adjustment_file;
@@ -100,6 +105,7 @@ class TGS_Viettel_Invoice_Plugin
         add_action('wp_ajax_tgs_viettel_pos_update_invoice_date', [$this, 'ajax_pos_update_invoice_date']);
         add_action('wp_ajax_nopriv_tgs_viettel_pos_retry_invoice', [$this, 'ajax_pos_retry_invoice']);
         add_action('wp_ajax_tgs_viettel_pos_send_invoice_email', [$this, 'ajax_pos_send_invoice_email']);
+        add_action('wp_ajax_tgs_viettel_pos_send_invoice_email_portal', [$this, 'ajax_pos_send_invoice_email_portal']);
         add_action('wp_ajax_nopriv_tgs_viettel_pos_send_invoice_email', [$this, 'ajax_pos_send_invoice_email']);
         add_action('wp_ajax_tgs_viettel_pos_preview_invoice_pdf', [$this, 'ajax_pos_preview_invoice_pdf']);
         add_action('wp_ajax_nopriv_tgs_viettel_pos_preview_invoice_pdf', [$this, 'ajax_pos_preview_invoice_pdf']);
@@ -2830,6 +2836,123 @@ class TGS_Viettel_Invoice_Plugin
             'file_name' => $pdf_file_name,
             'xml_file_name' => $xml_file_name,
             'api_http_code' => intval($pdf_result['http_code'] ?? 0),
+        ]);
+    }
+
+    /**
+     * GỬI EMAIL HÓA ĐƠN TỚI NHIỀU ĐỊA CHỈ qua PORTAL Viettel.
+     *
+     * Khác ajax_pos_send_invoice_email (API đối tác — gửi tới email trên hóa đơn):
+     * hàm này dùng portal web (vinvoice) nên gửi tới BẤT KỲ email nào, đúng định
+     * dạng hóa đơn chính thức của Viettel. Người dùng nhập 1+ email (phân cách
+     * ; , hoặc xuống dòng). Cần cấu hình portal ở "Cài đặt gửi mail" → mục 3.
+     */
+    public function ajax_pos_send_invoice_email_portal()
+    {
+        $this->bootstrap_requested_blog_context();
+        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+        if (
+            empty($nonce)
+            || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))
+        ) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+            return;
+        }
+        if (!$this->current_user_can_use_pos()) {
+            wp_send_json_error(['message' => 'Bạn không có quyền gửi email hóa đơn.'], 403);
+            return;
+        }
+        if (!class_exists('TGS_Viettel_Portal_Mailer')) {
+            wp_send_json_error(['message' => 'Thiếu module portal Viettel (deploy lại plugin).'], 500);
+            return;
+        }
+        if (!TGS_Viettel_Portal_Mailer::is_enabled()) {
+            wp_send_json_error(['message' => 'Website này chưa bật "Gửi email đa địa chỉ (portal Viettel)". Vào Quản trị → "Cài đặt gửi mail" → mục 3 để bật + nhập tài khoản portal.'], 400);
+            return;
+        }
+        if (!defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
+            wp_send_json_error(['message' => 'Chưa tìm thấy bảng theo dõi hóa đơn Viettel.'], 500);
+            return;
+        }
+
+        $sale_ledger_id = intval($_POST['sale_ledger_id'] ?? 0);
+        if ($sale_ledger_id <= 0) {
+            wp_send_json_error(['message' => 'Thiếu sale_ledger_id.'], 400);
+            return;
+        }
+
+        $emails = TGS_Viettel_Portal_Mailer::split_emails(wp_unslash($_POST['to_emails'] ?? ''));
+        if (empty($emails)) {
+            wp_send_json_error(['message' => 'Chưa có email người nhận hợp lệ — nhập ít nhất 1 email.'], 400);
+            return;
+        }
+
+        global $wpdb;
+        $created_by = get_current_user_id();
+        $latest = $wpdb->get_row(
+            $wpdb->prepare(
+                'SELECT local_viettel_invoice_id, sale_ledger_id, local_ledger_code, invoice_state, viettel_invoice_no, issue_response_payload, created_at
+                 FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . '
+                 WHERE sale_ledger_id = %d
+                 ORDER BY local_viettel_invoice_id DESC
+                 LIMIT 1',
+                $sale_ledger_id
+            ),
+            ARRAY_A
+        );
+        if (empty($latest)) {
+            wp_send_json_error(['message' => 'Không tìm thấy hóa đơn Viettel của đơn này.'], 404);
+            return;
+        }
+        if (sanitize_text_field($latest['invoice_state'] ?? '') !== 'done') {
+            wp_send_json_error(['message' => 'Chỉ gửi email cho hóa đơn đã gửi CQT thành công.'], 400);
+            return;
+        }
+
+        $invoice_no = sanitize_text_field((string) ($latest['viettel_invoice_no'] ?? ''));
+        if ($invoice_no === '') {
+            $invoice_no = $this->extract_invoice_no_from_issue_payload($latest['issue_response_payload'] ?? '');
+        }
+        if ($invoice_no === '') {
+            wp_send_json_error(['message' => 'Không lấy được invoiceNo để tra trên portal.'], 400);
+            return;
+        }
+
+        $issue_date = sanitize_text_field((string) ($latest['created_at'] ?? ''));
+        $res = TGS_Viettel_Portal_Mailer::send_invoice($invoice_no, $issue_date, $emails);
+
+        $this->insert_log_record([
+            'invoice_id' => intval($latest['local_viettel_invoice_id'] ?? 0),
+            'sale_ledger_id' => $sale_ledger_id,
+            'local_ledger_code' => sanitize_text_field($latest['local_ledger_code'] ?? ''),
+            'step_name' => 'send_invoice_email',
+            'action_name' => 'send_invoice_email_portal',
+            'endpoint' => 'portal:send-email-customer',
+            'request_payload' => wp_json_encode([
+                'invoice_no' => $invoice_no,
+                'viettel_id' => intval($res['invoice_id'] ?? 0),
+                'to' => implode(';', $emails),
+            ], JSON_UNESCAPED_UNICODE),
+            'response_payload' => (string) ($res['response'] ?? ($res['message'] ?? '')),
+            'http_code' => intval($res['http_code'] ?? 0),
+            'error_message' => empty($res['ok']) ? sanitize_text_field($res['message'] ?? 'Gửi email portal thất bại.') : '',
+            'created_by' => $created_by,
+        ]);
+
+        if (empty($res['ok'])) {
+            wp_send_json_error([
+                'message' => $res['message'] ?? 'Gửi email qua portal Viettel thất bại.',
+                'http_code' => intval($res['http_code'] ?? 0),
+            ], 400);
+            return;
+        }
+
+        wp_send_json_success([
+            'message' => 'Đã gửi email hóa đơn (portal Viettel) tới ' . implode('; ', $emails),
+            'to_email' => implode('; ', $emails),
+            'invoice_no' => $invoice_no,
+            'sale_ledger_id' => $sale_ledger_id,
+            'channel' => 'portal',
         ]);
     }
 

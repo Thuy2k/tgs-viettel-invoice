@@ -97,6 +97,7 @@ class TGS_Viettel_Invoice_Plugin
         add_action('wp_ajax_tgs_viettel_pos_retry_invoice', [$this, 'ajax_pos_retry_invoice']);
         add_action('wp_ajax_tgs_viettel_pos_recover_invoice_no', [$this, 'ajax_pos_recover_invoice_no']);
         add_action('wp_ajax_tgs_viettel_pos_import_replacement', [$this, 'ajax_pos_import_replacement']);
+        add_action('wp_ajax_tgs_viettel_pos_update_invoice_date', [$this, 'ajax_pos_update_invoice_date']);
         add_action('wp_ajax_nopriv_tgs_viettel_pos_retry_invoice', [$this, 'ajax_pos_retry_invoice']);
         add_action('wp_ajax_tgs_viettel_pos_send_invoice_email', [$this, 'ajax_pos_send_invoice_email']);
         add_action('wp_ajax_nopriv_tgs_viettel_pos_send_invoice_email', [$this, 'ajax_pos_send_invoice_email']);
@@ -2402,6 +2403,80 @@ class TGS_Viettel_Invoice_Plugin
             return;
         }
         wp_send_json_success($res);
+    }
+
+    /**
+     * POS: CẬP NHẬT NGÀY HÓA ĐƠN (hiển thị) của phiếu — dùng khi hóa đơn thay thế được lập sang
+     * ngày hôm sau, kế toán cần ngày HĐ trên HTsoft VAT + DATA VAT khớp ngày thật của HĐ thay thế.
+     * CHỈ đổi `issue_sent_at` (= ngày HĐ mà push_invoice_vat dùng cho VAT.NgayHD + bc-tk đọc làm ngày HĐ),
+     * KHÔNG đụng ngày tạo phiếu bán (local_ledger.created_at). Mật khẩu Thuy!@#. Đẩy lại VAT/DATA VAT
+     * sau đó để đồng bộ ngày. Giữ nguyên phần GIỜ cũ (chỉ đổi phần NGÀY).
+     */
+    public function ajax_pos_update_invoice_date()
+    {
+        $this->bootstrap_requested_blog_context();
+        $nonce = sanitize_text_field($_POST['nonce'] ?? '');
+        if (empty($nonce) || (!wp_verify_nonce($nonce, 'tgs_pos_nonce') && !wp_verify_nonce($nonce, 'tmd_pos_nonce'))) {
+            wp_send_json_error(['message' => 'Nonce không hợp lệ.'], 403);
+            return;
+        }
+        if (!$this->current_user_can_use_pos()) {
+            wp_send_json_error(['message' => 'Bạn không có quyền thao tác.'], 403);
+            return;
+        }
+        if ((string) ($_POST['password'] ?? '') !== 'Thuy!@#') {
+            wp_send_json_error(['message' => 'Mật khẩu không đúng.'], 403);
+            return;
+        }
+        $sale_ledger_id = intval($_POST['sale_ledger_id'] ?? 0);
+        $raw = trim((string) ($_POST['invoice_date'] ?? ''));
+        if ($sale_ledger_id <= 0 || $raw === '') {
+            wp_send_json_error(['message' => 'Thiếu phiếu hoặc ngày hóa đơn.'], 400);
+            return;
+        }
+        // Chấp nhận Y-m-d hoặc d/m/Y → chuẩn hóa Y-m-d.
+        $ymd = '';
+        if (preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $raw, $m)) {
+            $ymd = $m[1] . '-' . $m[2] . '-' . $m[3];
+        } elseif (preg_match('#^(\d{1,2})/(\d{1,2})/(\d{4})$#', $raw, $m)) {
+            $ymd = sprintf('%04d-%02d-%02d', $m[3], $m[2], $m[1]);
+        }
+        if ($ymd === '' || !strtotime($ymd)) {
+            wp_send_json_error(['message' => 'Ngày hóa đơn không hợp lệ (dùng dd/mm/yyyy).'], 400);
+            return;
+        }
+
+        global $wpdb;
+        $vi = $wpdb->prefix . 'local_viettel_invoice';
+        if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $vi)) !== $vi) {
+            wp_send_json_error(['message' => 'Thiếu bảng hóa đơn Viettel.'], 500);
+            return;
+        }
+        // Bản ghi hóa đơn mới nhất của phiếu.
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT local_viettel_invoice_id, issue_sent_at FROM {$vi}
+              WHERE sale_ledger_id=%d ORDER BY local_viettel_invoice_id DESC LIMIT 1",
+            $sale_ledger_id
+        ), ARRAY_A);
+        if (!$row) {
+            wp_send_json_error(['message' => 'Chưa có hóa đơn cho phiếu này.'], 404);
+            return;
+        }
+        // Giữ nguyên phần GIỜ cũ, chỉ đổi phần NGÀY.
+        $old = (string) ($row['issue_sent_at'] ?? '');
+        $time = (strlen($old) >= 19) ? substr($old, 11, 8) : current_time('H:i:s');
+        $new_dt = $ymd . ' ' . $time;
+
+        $ok = $wpdb->update($vi, ['issue_sent_at' => $new_dt], ['local_viettel_invoice_id' => (int) $row['local_viettel_invoice_id']]);
+        if ($ok === false) {
+            wp_send_json_error(['message' => 'Không cập nhật được ngày hóa đơn.'], 500);
+            return;
+        }
+        wp_send_json_success([
+            'message'      => 'Đã cập nhật ngày hóa đơn = ' . date('d/m/Y', strtotime($ymd))
+                . '. Bấm "Đẩy VAT sang HTsoft" rồi "Đẩy DB VAT" để đồng bộ ngày.',
+            'invoice_date' => $new_dt,
+        ]);
     }
 
     /**

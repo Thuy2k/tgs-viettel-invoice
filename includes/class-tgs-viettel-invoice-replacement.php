@@ -689,9 +689,23 @@ class TGS_Viettel_Invoice_Replacement
 
     private function invoice_issue_time_ms(array $original)
     {
-        $date = (string) ($original['issue_sent_at'] ?? ($original['created_at'] ?? ''));
-        $ts = $date !== '' ? strtotime($date) : false;
-        return ($ts !== false ? $ts : time()) * 1000;
+        /*
+         * originalInvoiceIssueDate phải ra ĐÚNG NGÀY (giờ VN) của hóa đơn gốc. issue_sent_at là giờ
+         * ĐỊA PHƯƠNG nhưng WP ép PHP tz = UTC → strtotime() lệch +7h → hóa đơn phát hành chiều/tối bị
+         * đẩy sang ngày hôm sau → Viettel không khớp hóa đơn gốc. Dựng theo tz site cho đúng.
+         */
+        $date = trim((string) ($original['issue_sent_at'] ?? ''));
+        if ($date === '') {
+            $date = trim((string) ($original['created_at'] ?? ''));
+        }
+        if ($date !== '') {
+            try {
+                return (new DateTime($date, wp_timezone()))->getTimestamp() * 1000;
+            } catch (\Exception $e) {
+                // rơi xuống fallback
+            }
+        }
+        return time() * 1000;
     }
 
     private function format_issue_date($ms)

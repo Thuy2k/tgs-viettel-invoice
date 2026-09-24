@@ -846,7 +846,8 @@ class TGS_Viettel_Invoice_Return_Adjustment
         $mau_so  = preg_match('/(\d+)/', $mau_raw, $mm) ? $mm[1] : '1'; // mẫu số (vd '1/006' -> '1')
         $seri_goc = (string) ($original['invoice_series'] ?? ($original_general['invoiceSeries'] ?? ''));
         $ngay_ms  = (int) $this->invoice_issue_time_ms($original);
-        $ngay_goc = $ngay_ms > 0 ? gmdate('d/m/Y', (int) round($ngay_ms / 1000)) : '';
+        // wp_date (không gmdate): ms giờ là epoch chuẩn, phải quy về NGÀY theo tz site cho câu diễn giải.
+        $ngay_goc = $ngay_ms > 0 ? wp_date('d/m/Y', (int) round($ngay_ms / 1000)) : '';
         $tien_giam_txt = number_format($sum_with_tax, 0, ',', '.');
 
         $note_cqt = 'Hóa đơn điều chỉnh giảm ' . $tien_giam_txt
@@ -1141,9 +1142,27 @@ class TGS_Viettel_Invoice_Return_Adjustment
 
     private function invoice_issue_time_ms(array $original)
     {
-        $date = (string) ($original['issue_sent_at'] ?? ($original['created_at'] ?? ''));
-        $timestamp = $date !== '' ? strtotime($date) : false;
-        return ($timestamp !== false ? $timestamp : time()) * 1000;
+        /*
+         * originalInvoiceIssueDate PHẢI ra ĐÚNG NGÀY (giờ VN) của hóa đơn gốc, nếu không Viettel
+         * báo "không tìm được hóa đơn gốc".
+         *
+         * BUG cũ: issue_sent_at/created_at là giờ ĐỊA PHƯƠNG (current_time trả giờ VN), nhưng WP ép
+         * PHP tz = UTC nên strtotime() hiểu nhầm chuỗi là UTC → epoch lệch +7h → hóa đơn phát hành
+         * buổi CHIỀU/TỐI bị đẩy sang NGÀY HÔM SAU. Trong ngày thì ngẫu nhiên vẫn đúng, còn điều chỉnh
+         * cho hóa đơn gốc HÔM TRƯỚC (chiều/tối) thì lệch ngày → Viettel không khớp. Dựng theo tz site.
+         */
+        $date = trim((string) ($original['issue_sent_at'] ?? ''));
+        if ($date === '') {
+            $date = trim((string) ($original['created_at'] ?? ''));
+        }
+        if ($date !== '') {
+            try {
+                return (new DateTime($date, wp_timezone()))->getTimestamp() * 1000;
+            } catch (\Exception $e) {
+                // rơi xuống fallback bên dưới
+            }
+        }
+        return time() * 1000;
     }
 
     private function deterministic_uuid($seed)

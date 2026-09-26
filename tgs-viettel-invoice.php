@@ -4254,6 +4254,8 @@ class TGS_Viettel_Invoice_Plugin
                 return;
             }
 
+            $send_t0 = microtime(true);
+            $send_timing = [];
             $process_lock = $this->acquire_sale_invoice_lock($sale_ledger_id);
             if ($process_lock === '') {
                 wp_send_json_error([
@@ -4392,6 +4394,7 @@ class TGS_Viettel_Invoice_Plugin
             // Tự sinh transactionUuid (thay null) để về sau gửi mail qua API Viettel được.
             $this->ensure_issue_transaction_uuid($issue_payload);
 
+            $send_timing['prepare'] = $this->timing_lap($send_t0);
             $created_by = get_current_user_id();
             $tracking_id = $this->create_auto_flow_tracking(
                 $source_result['payload'],
@@ -4430,6 +4433,7 @@ class TGS_Viettel_Invoice_Plugin
                 return;
             }
 
+            $send_timing['issue'] = $this->timing_lap($send_t0);
             $transaction_uuid = $this->extract_transaction_uuid($issue_result['response'] ?? []);
             $issue_response_json = wp_json_encode($issue_result['response'] ?? $issue_result, JSON_UNESCAPED_UNICODE);
             $this->update_auto_flow_tracking($tracking_id, [
@@ -4486,6 +4490,7 @@ class TGS_Viettel_Invoice_Plugin
                     if ($recovered_no !== '') { break; }
                     sleep(1); // chờ Viettel cấp số xong rồi tra lại
                 }
+                $send_timing['recover_no'] = $this->timing_lap($send_t0);
             }
 
             // Bước 4: Gửi CQT
@@ -4547,31 +4552,85 @@ class TGS_Viettel_Invoice_Plugin
                 'data.invoiceNo',
                 'invoiceNo',
             ]);
+            $send_timing['cqt'] = $this->timing_lap($send_t0);
 
-            // ĐẨY THÔNG TIN VAT SANG HTsoft (best-effort, KHÔNG chặn) — để đơn hàng bên kế toán HTsoft
-            // gắn được với hóa đơn VAT. Gate + bỏ qua bill Z/đơn chưa đẩy nằm trong push_invoice_vat.
-            if (class_exists('TGS_POS_HTsoft_Invoice_Push')
-                && method_exists('TGS_POS_HTsoft_Invoice_Push', 'push_invoice_vat')) {
-                global $wpdb;
-                $vat_sale_id = (int) $wpdb->get_var($wpdb->prepare(
-                    'SELECT sale_ledger_id FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . ' WHERE local_viettel_invoice_id = %d',
-                    $tracking_id
-                ));
-                if ($vat_sale_id > 0) {
-                    try {
-                        TGS_POS_HTsoft_Invoice_Push::push_invoice_vat($vat_sale_id);
-                    } catch (\Throwable $e) {
-                        error_log('[TGS Viettel] push VAT->HTsoft loi: ' . $e->getMessage());
-                    }
-                }
-            }
-
-            wp_send_json_success([
+            $response = [
                 'message'          => 'Phát hành và gửi CQT thành công!',
                 'transaction_uuid' => $transaction_uuid,
                 'invoice_no'       => $invoice_no,
                 'tracking_id'      => $tracking_id,
-            ]);
+                // Đo từng bước (ms) — POS in ra console để biết chậm ở đâu.
+                'timing_ms'        => $send_timing,
+            ];
+
+            /*
+             * ─── TRẢ KẾT QUẢ CHO POS TRƯỚC, ĐẨY VAT SANG HTsoft SAU ─────────────
+             *
+             * Hoá đơn đã phát hành + gửi CQT xong là thu ngân đi tiếp được. Đẩy VAT
+             * sang HTsoft (kết nối SQL Server + transaction ghi VAT/VATCT) là việc
+             * của kế toán, trước đây chạy CHẶN ngay trong request này nên nút "Đang
+             * gửi thuế" phải quay thêm cho tới khi HTsoft ghi xong.
+             *
+             * PHP-FPM: gửi JSON về trình duyệt, đóng kết nối (fastcgi_finish_request)
+             * rồi đẩy VAT tiếp trong CHÍNH tiến trình này — kết quả y như cũ, chỉ
+             * không bắt người dùng chờ. Máy chủ không phải FPM → chạy như cũ (đồng bộ).
+             */
+            $finish_fn = function_exists('fastcgi_finish_request') ? 'fastcgi_finish_request'
+                : (function_exists('litespeed_finish_request') ? 'litespeed_finish_request' : '');
+            if ($finish_fn !== '' && !headers_sent()) {
+                ignore_user_abort(true);
+                @header('Content-Type: application/json; charset=' . get_option('blog_charset'));
+                echo wp_json_encode(['success' => true, 'data' => $response]);
+                while (ob_get_level() > 0) {
+                    @ob_end_flush();
+                }
+                $finish_fn();
+                // Hoá đơn đã xong → nhả khoá ngay, lần bấm lại (nếu có) nhận "đã gửi" thay vì "đang xử lý".
+                global $wpdb;
+                $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $process_lock));
+                $this->push_vat_after_issue($tracking_id);
+                exit;
+            }
+
+            $this->push_vat_after_issue($tracking_id);
+            $response['timing_ms']['vat_htsoft_sync'] = $this->timing_lap($send_t0);
+            wp_send_json_success($response);
+        }
+
+        /** Mốc thời gian (ms) kể từ $t0 — dùng đo từng bước gửi thuế. */
+        private function timing_lap($t0)
+        {
+            return (int) round((microtime(true) - $t0) * 1000);
+        }
+
+        /**
+         * ĐẨY THÔNG TIN VAT SANG HTsoft (best-effort, KHÔNG chặn) — để đơn hàng bên kế toán HTsoft
+         * gắn được với hóa đơn VAT. Gate + bỏ qua bill Z/đơn chưa đẩy nằm trong push_invoice_vat.
+         */
+        private function push_vat_after_issue($tracking_id)
+        {
+            if (!class_exists('TGS_POS_HTsoft_Invoice_Push')
+                || !method_exists('TGS_POS_HTsoft_Invoice_Push', 'push_invoice_vat')) {
+                return;
+            }
+            global $wpdb;
+            $vat_sale_id = (int) $wpdb->get_var($wpdb->prepare(
+                'SELECT sale_ledger_id FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . ' WHERE local_viettel_invoice_id = %d',
+                $tracking_id
+            ));
+            if ($vat_sale_id <= 0) {
+                return;
+            }
+            $t0 = microtime(true);
+            try {
+                TGS_POS_HTsoft_Invoice_Push::push_invoice_vat($vat_sale_id);
+            } catch (\Throwable $e) {
+                error_log('[TGS Viettel] push VAT->HTsoft loi: ' . $e->getMessage());
+            }
+            $ms = $this->timing_lap($t0);
+            if ($ms > 3000) {
+                error_log('[TGS Viettel] push VAT->HTsoft cham: ' . $ms . 'ms (sale ' . $vat_sale_id . ')');
+            }
         }
 
     public function handle_sale_completed($sale_data)

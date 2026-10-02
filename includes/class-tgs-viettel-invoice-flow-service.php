@@ -1954,7 +1954,11 @@ class TGS_Viettel_Invoice_Flow_Service
                     : (string) ($customer['customer_company_name'] ?? ''),
                 'buyerTaxCode' => (string) ($customer['customer_tax_code'] ?? ''),
                 'buyerAddressLine' => (string) ($customer['customer_address'] ?? ''),
-                'buyerPhoneNumber' => (string) ($customer['customer_phone'] ?? ''),
+                // SĐT chỉ giữ chữ số (đơn cũ lỡ lưu "'0367…" / có dấu cách làm Viettel báo lỗi); +84 → 0.
+                'buyerPhoneNumber' => (static function ($p) {
+                    $d = preg_replace('/\D+/', '', (string) $p);
+                    return (strlen($d) === 11 && strpos($d, '84') === 0) ? '0' . substr($d, 2) : $d;
+                })($customer['customer_phone'] ?? ''),
                 'buyerEmail' => !empty($customer['customer_email']) ? $customer['customer_email'] : null,
                 'buyerNotGetInvoice' => '0',
             ],

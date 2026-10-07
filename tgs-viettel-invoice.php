@@ -2271,13 +2271,97 @@ class TGS_Viettel_Invoice_Plugin
         $latest = $this->get_latest_sale_invoice($sale_ledger_id);
         $invoice_id = intval($latest['local_viettel_invoice_id'] ?? 0);
         $transaction_uuid = sanitize_text_field($latest['issue_transaction_uuid'] ?? '');
-        if ($invoice_id <= 0) {
-            wp_send_json_error(['message' => 'Đơn chưa từng phát hành hóa đơn — dùng nút "gửi lại" để phát hành.'], 400);
-            return;
-        }
 
         // NHẬP TAY: nếu người dùng đưa sẵn SỐ hóa đơn (đọc từ portal Viettel) thì dùng luôn, khỏi tra.
         $manual_no = preg_replace('/[^A-Za-z0-9\/._-]/', '', sanitize_text_field((string) wp_unslash($_POST['manual_invoice_no'] ?? '')));
+
+        /*
+         * "TRA VIETTEL ĐỀN BÙ" (07/10/2026) — đơn HUỶ GỬI THUẾ / chưa gửi, hoá đơn
+         * đã được lập bù trên Viettel. Người dùng nhập SỐ HOÁ ĐƠN; máy TRA số đó
+         * trên Viettel (lấy file hoá đơn theo số) — CÓ THẬT mới gắn vào đơn và chốt
+         * "Thành công". KHÔNG gửi gì lên Viettel / cơ quan thuế.
+         * $_POST['compensate']=1 bật chế độ này (bắt buộc kiểm số, cho phép đơn
+         * chưa từng có bản ghi hoá đơn).
+         */
+        $compensate = !empty($_POST['compensate']);
+        if ($compensate) {
+            if ($manual_no === '') {
+                wp_send_json_error(['message' => 'Chưa nhập số hóa đơn Viettel.'], 400);
+                return;
+            }
+            // Số này đã gắn cho phiếu khác của shop thì không cho gắn lần nữa
+            $dup = $wpdb->get_row($wpdb->prepare(
+                'SELECT sale_ledger_id, local_ledger_code FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . '
+                  WHERE viettel_invoice_no = %s AND (sale_ledger_id IS NULL OR sale_ledger_id <> %d) LIMIT 1',
+                $manual_no, $sale_ledger_id
+            ), ARRAY_A);
+            if (!empty($dup)) {
+                wp_send_json_error(['message' => 'Số hóa đơn ' . $manual_no . ' đã gắn cho phiếu ' . ($dup['local_ledger_code'] ?: ('#' . $dup['sale_ledger_id'])) . ' — không gắn trùng.'], 400);
+                return;
+            }
+
+            $settings = self::get_settings_for_invoice($invoice_id);
+            $supplier_tax_code = sanitize_text_field($settings['supplier_tax_code'] ?? '');
+            $template_code = sanitize_text_field($settings['default_template_code'] ?? '');
+            if ($template_code === '') {
+                $defaults = self::get_default_settings();
+                $template_code = $defaults['default_template_code'] ?? '1/1156';
+            }
+            if ($supplier_tax_code === '') {
+                wp_send_json_error(['message' => 'Thiếu MST nhà cung cấp trong cấu hình Viettel của shop.'], 400);
+                return;
+            }
+            $check = $this->fetch_invoice_representation_file($settings, $supplier_tax_code, $manual_no, $template_code, 'PDF');
+            if (empty($check['success'])) {
+                wp_send_json_error([
+                    'message' => 'Không tra thấy hóa đơn số ' . $manual_no . ' trên Viettel (MST ' . $supplier_tax_code . ', mẫu ' . $template_code . '): '
+                        . ($check['message'] ?? 'không rõ lỗi') . ' — kiểm tra lại số hóa đơn. Chưa đổi gì trên đơn.',
+                    'step' => 'compensate_not_found',
+                ], 400);
+                return;
+            }
+
+            if ($invoice_id <= 0) {
+                $sale_code = defined('TGS_TABLE_LOCAL_LEDGER') ? (string) $wpdb->get_var($wpdb->prepare(
+                    'SELECT local_ledger_code FROM ' . TGS_TABLE_LOCAL_LEDGER . ' WHERE local_ledger_id = %d',
+                    $sale_ledger_id
+                )) : '';
+                $invoice_id = $this->create_auto_flow_tracking(
+                    ['sale_ledger_id' => $sale_ledger_id, 'sale_code' => $sale_code, 'source' => 'tra_viettel_den_bu'],
+                    [], get_current_user_id(), 'pending', 0, 0, ''
+                );
+                if ($invoice_id <= 0) {
+                    wp_send_json_error(['message' => 'Không tạo được bản ghi hóa đơn cho đơn này.'], 500);
+                    return;
+                }
+                $latest = ['local_viettel_invoice_id' => $invoice_id, 'local_ledger_code' => $sale_code];
+            }
+            $this->update_auto_flow_tracking($invoice_id, [
+                'template_code' => $template_code,
+                'issue_sent_at' => current_time('mysql'),
+            ]);
+            $this->insert_log_record([
+                'invoice_id' => $invoice_id,
+                'sale_ledger_id' => $sale_ledger_id,
+                'local_ledger_code' => sanitize_text_field($latest['local_ledger_code'] ?? ''),
+                'step_name' => 'recover_invoice_no',
+                'action_name' => 'tra_viettel_den_bu',
+                'endpoint' => untrailingslashit($settings['api_base_url'] ?? '') . '/InvoiceAPI/InvoiceUtilsWS/getInvoiceRepresentationFile',
+                'request_payload' => wp_json_encode(['supplierTaxCode' => $supplier_tax_code, 'invoiceNo' => $manual_no, 'templateCode' => $template_code], JSON_UNESCAPED_UNICODE),
+                'response_payload' => 'Đã tra thấy hóa đơn trên Viettel — gắn số vào đơn (đền bù, không gửi).',
+                'http_code' => intval($check['http_code'] ?? 200),
+                'error_message' => '',
+                'created_by' => get_current_user_id(),
+            ]);
+            $transaction_uuid = ''; // đền bù: KHÔNG gửi CQT
+        }
+
+        if ($invoice_id <= 0) {
+            wp_send_json_error([
+                'message' => 'Đơn chưa từng phát hành hóa đơn — dùng nút "Gửi lại" để phát hành, hoặc "Tra Viettel đền bù" nếu hóa đơn đã lập bù trên Viettel.',
+            ], 400);
+            return;
+        }
 
         $invoice_no = '';
         if ($manual_no !== '') {

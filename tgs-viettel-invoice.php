@@ -2340,6 +2340,14 @@ class TGS_Viettel_Invoice_Plugin
                 'template_code' => $template_code,
                 'issue_sent_at' => current_time('mysql'),
             ]);
+            // Chụp dòng hàng + tổng tiền của đơn vào bản ghi — hoàn hàng về sau cần
+            // bản chụp này để lập hoá đơn điều chỉnh giảm (xem ensure_sale_snapshot()).
+            $this->ensure_sale_snapshot($invoice_id, $sale_ledger_id);
+            // Ký hiệu hoá đơn THẬT nằm ngay trong số hoá đơn (C26MPT12345 → C26MPT) —
+            // hoá đơn điều chỉnh giảm về sau phải dẫn đúng ký hiệu này, không phải ký hiệu mặc định.
+            if (preg_match('/^([A-Za-z]\d{2}[A-Za-z]{3})\d+$/', $manual_no, $series_match)) {
+                $this->update_auto_flow_tracking($invoice_id, ['invoice_series' => strtoupper($series_match[1])]);
+            }
             $this->insert_log_record([
                 'invoice_id' => $invoice_id,
                 'sale_ledger_id' => $sale_ledger_id,
@@ -5187,6 +5195,90 @@ class TGS_Viettel_Invoice_Plugin
         );
 
         return is_array($row) ? $row : [];
+    }
+
+    /**
+     * BẢN CHỤP DÒNG HÀNG cho bản ghi hoá đơn KHÔNG đi qua luồng gửi (vd "Tra
+     * Viettel đền bù": hoá đơn lập tay trên Viettel, mình chỉ gắn số).
+     *
+     * Hoá đơn điều chỉnh giảm (hoàn hàng) dựng từ smart_filtered_payload của hoá
+     * đơn gốc; bản ghi đền bù không có → "hóa đơn gốc thiếu snapshot dòng hàng".
+     * Hàm này dựng lại bản chụp TỪ CHÍNH PHIẾU BÁN, theo đúng các bước của luồng
+     * gửi thường (đọc đơn → lọc dòng gửi thuế → payload phát hành) nhưng KHÔNG
+     * gọi Viettel, rồi lưu vào bản ghi. Đã có bản chụp thì không đụng.
+     *
+     * Lưu ý: bản chụp phản ánh đơn trên BTsoft theo luật lọc mặc định — hoá đơn
+     * lập tay trên Viettel phải khớp đơn này.
+     *
+     * @return bool true = bản ghi đã/đang có bản chụp dòng hàng
+     */
+    public function ensure_sale_snapshot($invoice_id, $sale_ledger_id)
+    {
+        global $wpdb;
+        $invoice_id = (int) $invoice_id;
+        $sale_ledger_id = (int) $sale_ledger_id;
+        if ($invoice_id <= 0 || $sale_ledger_id <= 0 || !$this->flow_service || !defined('TGS_TABLE_LOCAL_VIETTEL_INVOICE')) {
+            return false;
+        }
+        $current = json_decode((string) $wpdb->get_var($wpdb->prepare(
+            'SELECT smart_filtered_payload FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . ' WHERE local_viettel_invoice_id = %d',
+            $invoice_id
+        )), true);
+        if (!empty($current['items'])) {
+            return true;
+        }
+
+        try {
+            $source = $this->flow_service->build_smart_payload_from_sale($sale_ledger_id);
+            if (empty($source['success'])) {
+                error_log('[TGS Viettel] ensure_sale_snapshot ' . $sale_ledger_id . ': ' . ($source['message'] ?? 'không đọc được đơn'));
+                return false;
+            }
+            $source_payload = $source['payload'];
+            $filtered = $this->flow_service->filter_and_sort_items_for_tax($source_payload);
+            if (empty($filtered['success']) || empty($filtered['payload']['items'])) {
+                error_log('[TGS Viettel] ensure_sale_snapshot ' . $sale_ledger_id . ': ' . ($filtered['message'] ?? 'không có dòng gửi thuế'));
+                return false;
+            }
+            $filtered_payload = $filtered['payload'];
+            $source_payload['source'] = 'tra_viettel_den_bu';
+
+            $data = [
+                'smart_source_payload'       => wp_json_encode($source_payload, JSON_UNESCAPED_UNICODE),
+                'smart_filtered_payload'     => wp_json_encode($filtered_payload, JSON_UNESCAPED_UNICODE),
+                'contains_under24_main_item' => intval($filtered_payload['contains_under24_main_item'] ?? 0),
+                'under24_main_sku_list_json' => wp_json_encode($filtered_payload['under24_main_sku_list'] ?? [], JSON_UNESCAPED_UNICODE),
+                'updated_at'                 => current_time('mysql'),
+            ];
+
+            // Tổng tiền / ký hiệu / người mua: lấy từ payload phát hành dựng thử (không gửi)
+            $settings = self::get_settings_for_invoice($invoice_id);
+            $issue = $this->flow_service->build_issue_payload_from_filtered($filtered_payload, $settings);
+            if (!empty($issue['success'])) {
+                $ip = $issue['payload'];
+                $data['issue_request_payload'] = wp_json_encode($ip, JSON_UNESCAPED_UNICODE);
+                $data['total_before_tax'] = floatval($issue['totals']['total_before_tax'] ?? 0);
+                $data['total_tax_amount'] = floatval($issue['totals']['total_tax'] ?? 0);
+                $data['total_after_tax']  = floatval($issue['totals']['total_after_tax'] ?? 0);
+                $data['invoice_series']   = sanitize_text_field($ip['generalInvoiceInfo']['invoiceSeries'] ?? '');
+                $data['buyer_name']       = sanitize_text_field($ip['buyerInfo']['buyerName'] ?? '');
+                $data['buyer_tax_code']   = sanitize_text_field($ip['buyerInfo']['buyerTaxCode'] ?? '');
+            }
+            // Ký hiệu THẬT nằm ngay trong số hoá đơn đã gắn (C26MPT12345 → C26MPT) — hoá đơn
+            // điều chỉnh giảm phải dẫn đúng ký hiệu này, không phải ký hiệu mặc định của shop.
+            $attached_no = (string) $wpdb->get_var($wpdb->prepare(
+                'SELECT viettel_invoice_no FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . ' WHERE local_viettel_invoice_id = %d',
+                $invoice_id
+            ));
+            if (preg_match('/^([A-Za-z]\d{2}[A-Za-z]{3})\d+$/', $attached_no, $series_match)) {
+                $data['invoice_series'] = strtoupper($series_match[1]);
+            }
+            $this->update_auto_flow_tracking($invoice_id, $data);
+            return true;
+        } catch (\Throwable $e) {
+            error_log('[TGS Viettel] ensure_sale_snapshot ' . $sale_ledger_id . ' exception: ' . $e->getMessage());
+            return false;
+        }
     }
 
     private function create_auto_flow_tracking($source_payload, $filtered_payload, $created_by, $invoice_state, $issue_status, $send_cqt_status, $error_message)

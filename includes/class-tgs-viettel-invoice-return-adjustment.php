@@ -619,6 +619,24 @@ class TGS_Viettel_Invoice_Return_Adjustment
 
         $filtered = json_decode((string) ($original['smart_filtered_payload'] ?? ''), true);
         $original_items = is_array($filtered['items'] ?? null) ? $filtered['items'] : [];
+        /*
+         * Hoá đơn gốc gắn bằng "Tra Viettel đền bù" (không đi qua luồng gửi) có thể
+         * chưa có bản chụp dòng hàng → dựng lại từ phiếu bán rồi đọc lại.
+         */
+        if (empty($original_items) && $this->plugin && method_exists($this->plugin, 'ensure_sale_snapshot')
+            && intval($original['sale_ledger_id'] ?? 0) > 0
+            && $this->plugin->ensure_sale_snapshot(intval($original['local_viettel_invoice_id'] ?? 0), intval($original['sale_ledger_id']))) {
+            // Đọc lại CẢ bản ghi: phần dưới còn dùng payload phát hành, ký hiệu, tổng tiền
+            $reloaded = $wpdb->get_row($wpdb->prepare(
+                'SELECT * FROM ' . TGS_TABLE_LOCAL_VIETTEL_INVOICE . ' WHERE local_viettel_invoice_id = %d',
+                intval($original['local_viettel_invoice_id'])
+            ), ARRAY_A);
+            if (is_array($reloaded)) {
+                $original = $reloaded;
+            }
+            $filtered = json_decode((string) ($original['smart_filtered_payload'] ?? ''), true);
+            $original_items = is_array($filtered['items'] ?? null) ? $filtered['items'] : [];
+        }
         $original_map = [];
         foreach ($original_items as $item) {
             $source_id = intval($item['ledger_item_id'] ?? 0);

@@ -358,28 +358,6 @@ class TGS_Viettel_Invoice_Flow_Service
      * @return string Tên lớp, hoặc chuỗi rỗng nếu không có bản nào.
      */
     /**
-     * Mặt hàng mã Z — KHÔNG được kèm lên hoá đơn thuế.
-     *
-     * Quy ước lấy thẳng từ TGS_POS_Order_Handler để hai plugin không hiểu khác
-     * nhau. ⚠️ KHÔNG phụ thuộc cờ "hàng tặng": mã Z bán ra như hàng thường
-     * (bán bù quà hỏng, đổi quà) vẫn là mã Z và vẫn không được lên hoá đơn.
-     * Bản cũ đòi phải là hàng tặng nên đơn toàn mã Z bán thường đã lọt lên CQT.
-     */
-    public static function is_promo_split_sku($sku)
-    {
-        $sku = strtoupper(trim((string) $sku));
-        if ($sku === '') {
-            return false;
-        }
-
-        if (class_exists('TGS_POS_Order_Handler')) {
-            return (bool) TGS_POS_Order_Handler::is_promo_split_sku($sku);
-        }
-
-        return substr($sku, -1) === 'Z';
-    }
-
-    /**
      * ─── ĐVT KHAI TRÊN HOÁ ĐƠN = ĐVT LÚC BÁN, KHÔNG PHẢI ĐƠN VỊ NHỎ NHẤT ───
      *
      * Kho quy mọi thứ về đơn vị nhỏ nhất để cộng tồn cho gọn: bán 1 Vỉ_4 thì
@@ -1505,7 +1483,7 @@ class TGS_Viettel_Invoice_Flow_Service
             }
 
             $countable_lines++;
-            if (self::is_promo_split_sku($item['sku'] ?? '')) {
+            if (TGS_Item_Variant::is_internal($item['sku'] ?? '')) {
                 $promo_skus[] = (string) ($item['sku'] ?? '');
             }
         }

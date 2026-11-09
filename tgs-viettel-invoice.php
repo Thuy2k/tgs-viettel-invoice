@@ -1726,10 +1726,9 @@ class TGS_Viettel_Invoice_Plugin
             $tax_percent = floatval($row['local_ledger_item_tax_percent'] ?? 0);
             $tax_amount = floatval($row['local_ledger_item_tax_amount'] ?? 0);
 
-            // Phát hiện SKU kết thúc bằng chữ Z (case-insensitive).
-            // Ghi chú: phần mềm nghiệp vụ bên ngoài đang đặt đuôi Z cho các KM đặc biệt,
-            // hệ thống fill sẵn "loại bỏ" để an toàn — nhân viên vẫn có thể bỏ tích nếu cần.
-            $is_sku_ends_z = TGS_Viettel_Invoice_Flow_Service::is_promo_split_sku($sku);
+            // Hàng Biến thể Nội bộ (TGS_Item_Variant, không theo đuôi mã): hệ thống fill sẵn "loại bỏ"
+            // khỏi hoá đơn thuế, khoá không cho tích lại.
+            $is_internal = TGS_Item_Variant::is_internal($sku);
 
             /*
              * ─── HIỆN THEO ĐVT NHỎ NHẤT (ĐVCB) — GIỐNG HỆT HOÁ ĐƠN SẼ GỬI ─────
@@ -1760,7 +1759,7 @@ class TGS_Viettel_Invoice_Plugin
                 'tax_amount'              => $tax_amount,
                 'is_gift'                 => $is_gift,
                 'is_under24_promo_danger' => $danger,
-                'is_sku_ends_z'           => $is_sku_ends_z,
+                'is_internal'             => $is_internal,
             ];
 
             $all_items[] = $item;
@@ -1771,12 +1770,12 @@ class TGS_Viettel_Invoice_Plugin
                     $has_under24_main = true;
                     $under24_main_skus[] = $sku;
                 }
-                if ($is_sku_ends_z) {
+                if ($is_internal) {
                     $stat_z_main_count++;
                 }
             } else {
                 $gift_items[] = $item;
-                if ($is_sku_ends_z) {
+                if ($is_internal) {
                     $stat_z_sku_count++;
                 }
                 if ($danger) {
@@ -1916,13 +1915,11 @@ class TGS_Viettel_Invoice_Plugin
                     'is_gift'   => intval($row['local_ledger_item_gift_type'] ?? 0) === 1,
                     /*
                      * Dòng này do HỆ THỐNG tự tách hay do NHÂN VIÊN chuyển tay?
-                     * Hệ thống tự tách = mã đuôi Z HOẶC quà sữa <24m
+                     * Hệ thống tự tách = hàng Nội bộ HOẶC quà sữa <24m
                      * (is_under24_promo_danger). Cả hai đều KHÔNG kéo lại bill
                      * chính ở màn review (một chiều) — cờ này chỉ để gắn nhãn.
                      */
-                    'is_sku_ends_z' => TGS_Viettel_Invoice_Flow_Service::is_promo_split_sku(
-                        (string) ($row['local_product_sku'] ?? '')
-                    ),
+                    'is_internal' => TGS_Item_Variant::is_internal((string) ($row['local_product_sku'] ?? '')),
                     'is_under24_promo_danger' => intval($row['local_ledger_item_is_under24_promo_danger'] ?? 0) === 1,
                 ];
             }
@@ -4131,7 +4128,7 @@ class TGS_Viettel_Invoice_Plugin
                 }
                 $counted++;
                 $sku = (string) ($item_info['sku'] ?? '');
-                if (TGS_Viettel_Invoice_Flow_Service::is_promo_split_sku($sku)) {
+                if (TGS_Item_Variant::is_internal($sku)) {
                     $promo_skus[] = $sku;
                 }
             }

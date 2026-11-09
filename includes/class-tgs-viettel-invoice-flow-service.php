@@ -1483,7 +1483,7 @@ class TGS_Viettel_Invoice_Flow_Service
             }
 
             $countable_lines++;
-            if (TGS_Item_Variant::is_internal($item['sku'] ?? '')) {
+            if (!TGS_Item_Variant::sends_tax($item['sku'] ?? '')) {
                 $promo_skus[] = (string) ($item['sku'] ?? '');
             }
         }
